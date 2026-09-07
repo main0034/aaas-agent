@@ -92,6 +92,24 @@ histogram, every policy refusal, and any PR URL that appeared. The histogram is
 what makes a slow run diagnosable — "twenty minutes" is not a finding, "forty
 `git status` calls" is.
 
+## Before you trust the first run
+
+Two things in here are asserted rather than proven, and both are cheap to check
+on the first run. Finding 2 in `FINDINGS.md` cost a day to an assumption about
+identity that was never tested, so test these:
+
+1. **The isolation check actually blocks.** `verify-isolation` runs on every
+   start and prints `[ok]` — read that line rather than assuming it appeared.
+   To see it fail, run with `-e ARM_CLIENT_ID=x` added and confirm the container
+   refuses to start.
+2. **A policy refusal actually fires.** Ask the agent, in the first run, to run
+   `terraform plan` and check it comes back with the refusal text rather than a
+   "command not found". The hook is the gate; a hook that silently does not run
+   would look identical to a well-behaved agent until the day it isn't.
+
+The image build itself is the one step never executed here — if it fails, the
+GitHub CLI apt repository is the likely place.
+
 ## Known gaps
 
 - **The container has general network access.** It needs `api.anthropic.com` and
