@@ -1,0 +1,98 @@
+"""
+Builds the agent's working tree.
+
+Deliberately clones from GitHub rather than mounting the local checkouts.
+
+Two reasons, and the second is the one that matters:
+
+  1. The agent works from origin state, so a run is reproducible and cannot be
+     accidentally influenced by whatever branch happens to be checked out on
+     the laptop.
+  2. A failed or confused run cannot dirty a working tree that has real work in
+     it. The blast radius of a bad run is a directory under runs/ and a branch
+     on GitHub, both of which are cheap to delete.
+
+The modules repo is cloned as *reference*: the deployment runbook tells the
+agent to read `modules/app-stack/README.md`, and the policy layer refuses to
+write anywhere inside it.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+GIT_USER_NAME = "aaas-agent"
+GIT_USER_EMAIL = "aaas-agent@users.noreply.github.com"
+
+
+class WorkspaceError(RuntimeError):
+    pass
+
+
+@dataclass
+class Workspace:
+    root: Path
+    deployments: Path
+    reference: Path
+
+    @property
+    def writable_roots(self) -> list[Path]:
+        # Only the deployments checkout. Within it, policy.py still refuses the
+        # guardrail paths.
+        return [self.deployments]
+
+
+def _run(cmd: list[str], cwd: Path | None = None) -> str:
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise WorkspaceError(
+            f"`{' '.join(cmd)}` failed ({result.returncode}):\n"
+            f"{result.stderr.strip() or result.stdout.strip()}"
+        )
+    return result.stdout.strip()
+
+
+def _clone(owner: str, repo: str, dest: Path) -> Path:
+    """Clone with `gh` so the token in GH_TOKEN is used and never written to disk."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run(["gh", "repo", "clone", f"{owner}/{repo}", str(dest), "--", "--quiet"])
+    return dest
+
+
+def prepare(
+    root: Path,
+    owner: str,
+    deployments_repo: str = "aaas-deployments",
+    modules_repo: str = "aaas-infra-modules",
+) -> Workspace:
+    if not os.environ.get("GH_TOKEN"):
+        raise WorkspaceError(
+            "GH_TOKEN is not set. The agent needs a token that can push a branch and "
+            "open a pull request on the deployments repo, and nothing else. See the "
+            "README - a fine-grained PAT scoped to that one repository is the right "
+            "shape for the POC."
+        )
+
+    root.mkdir(parents=True, exist_ok=True)
+
+    deployments = _clone(owner, deployments_repo, root / deployments_repo)
+    _run(["git", "config", "user.name", GIT_USER_NAME], cwd=deployments)
+    _run(["git", "config", "user.email", GIT_USER_EMAIL], cwd=deployments)
+
+    reference_root = root / "reference"
+    reference_root.mkdir(parents=True, exist_ok=True)
+    _clone(owner, modules_repo, reference_root / modules_repo)
+
+    return Workspace(root=root, deployments=deployments, reference=reference_root)
+
+
+def head_sha(repo: Path) -> str:
+    return _run(["git", "rev-parse", "HEAD"], cwd=repo)

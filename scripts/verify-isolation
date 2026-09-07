@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#
+# Asserts the container is what it claims to be, then execs the real command.
+#
+# This exists because "the agent cannot touch your tenant" is the single claim
+# the whole design rests on, and an unverified claim about identity has already
+# cost this project a day (FINDINGS.md #2). A check that runs on every single
+# invocation is cheap; discovering in month four that a stray AZURE_CLIENT_ID
+# was being passed through is not.
+#
+# Fails loudly and refuses to start. There is no --force.
+
+set -euo pipefail
+
+fail=0
+err() { echo "  [FAIL] $*" >&2; fail=1; }
+
+echo "Verifying isolation…"
+
+# 1. No tooling that can reach the cloud.
+for forbidden in az terraform terragrunt pulumi aws gcloud; do
+  if command -v "$forbidden" >/dev/null 2>&1; then
+    err "\`$forbidden\` is present in this image. The agent must have no direct path to any cloud."
+  fi
+done
+
+# 2. No credentials in the environment. Checked by prefix rather than by name,
+#    because the failure mode is a variable nobody thought to list.
+leaked=$(env | grep -Ei '^(AZURE_|ARM_|AAD_|MSI_|IDENTITY_|AWS_|GOOGLE_)' | cut -d= -f1 || true)
+if [ -n "$leaked" ]; then
+  err "cloud credentials are present in the environment: $(echo "$leaked" | tr '\n' ' ')"
+  err "run.sh builds an explicit allowlist of variables - something is passing these through."
+fi
+
+# 3. No credential files mounted in.
+for path in "$HOME/.azure" "$HOME/.aws" "$HOME/.config/gcloud"; do
+  if [ -e "$path" ]; then
+    err "$path exists inside the container. Nothing should be mounting it."
+  fi
+done
+
+# 4. The two things that must be present.
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  err "ANTHROPIC_API_KEY is not set. Export it on the host before running run.sh."
+fi
+if [ -z "${GH_TOKEN:-}" ]; then
+  err "GH_TOKEN is not set. The agent needs a token scoped to the deployments repo."
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  err "the Claude Code CLI is missing; the SDK cannot start a session without it."
+fi
+if ! command -v gh >/dev/null 2>&1; then
+  err "gh is missing."
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "" >&2
+  echo "Refusing to start. The isolation this run depends on is not intact." >&2
+  exit 1
+fi
+
+echo "  [ok]   no cloud CLI, no cloud credentials, tokens present"
+echo ""
+
+exec "$@"

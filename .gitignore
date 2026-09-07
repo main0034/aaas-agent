@@ -1,0 +1,8 @@
+# Run records contain full transcripts, including whatever the requester typed.
+# Keep them local; promote the interesting ones into FINDINGS.md by hand.
+runs/
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
