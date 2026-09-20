@@ -60,7 +60,7 @@ fi
 [ "$missing" -eq 0 ] || exit 2
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1 || [ "${AAAS_REBUILD:-0}" = "1" ]; then
-  echo "Building $IMAGE…"
+  echo "Building $IMAGE..."
   docker build -t "$IMAGE" "$HERE"
   echo ""
 fi

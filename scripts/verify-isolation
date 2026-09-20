@@ -15,7 +15,7 @@ set -euo pipefail
 fail=0
 err() { echo "  [FAIL] $*" >&2; fail=1; }
 
-echo "Verifying isolation…"
+echo "Verifying isolation..."
 
 # 1. No tooling that can reach the cloud.
 for forbidden in az terraform terragrunt pulumi aws gcloud; do
