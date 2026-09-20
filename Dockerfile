@@ -45,8 +45,16 @@ RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 
+# Explicit octal, not `chmod +x`.
+#
+# COPY preserves the source file's mode, and files written by some editors and
+# sync tools are owner-only (0600/0700). `chmod +x` then adds execute WITHOUT
+# adding read, giving 0711 - which works for a compiled binary and fails for a
+# script, because the kernel must read the file to hand it to the interpreter.
+# As root that is invisible. As USER node it is "Permission denied" with no
+# hint about file modes.
 COPY scripts/verify-isolation /usr/local/bin/verify-isolation
-RUN chmod +x /usr/local/bin/verify-isolation
+RUN chmod 0755 /usr/local/bin/verify-isolation
 
 # Two disposable-container conveniences, set before dropping privileges:
 # --system so they apply to the node user, and safe.directory because a clone
@@ -57,7 +65,10 @@ RUN git config --system --add safe.directory '*' \
 
 WORKDIR /work
 COPY harness /work/harness
-RUN mkdir -p /work/runs && chown -R node:node /work
+# Same reasoning: normalise modes rather than inheriting whatever the host had.
+RUN mkdir -p /work/runs \
+    && chown -R node:node /work \
+    && chmod -R a+rX /work
 
 USER node
 
