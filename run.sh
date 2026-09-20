@@ -59,9 +59,24 @@ EOF
 fi
 [ "$missing" -eq 0 ] || exit 2
 
-if ! docker image inspect "$IMAGE" >/dev/null 2>&1 || [ "${AAAS_REBUILD:-0}" = "1" ]; then
-  echo "Building $IMAGE..."
-  docker build -t "$IMAGE" "$HERE"
+# The Dockerfile COPYs harness/ into the image, so a code change that is not
+# rebuilt runs the previous version and looks like the fix did not work. Rather
+# than relying on remembering a flag, stamp the image with a hash of its sources
+# and rebuild whenever they differ. shasum is present on macOS and Linux both.
+src_hash() {
+  find "$HERE/harness" "$HERE/scripts" "$HERE/Dockerfile" "$HERE/requirements.txt" \
+    -type f 2>/dev/null | sort | xargs shasum 2>/dev/null | shasum | cut -d' ' -f1
+}
+HASH="$(src_hash)"
+STAMP="$(docker image inspect -f '{{index .Config.Labels "aaas.src"}}' "$IMAGE" 2>/dev/null || true)"
+
+if [ "$STAMP" != "$HASH" ] || [ "${AAAS_REBUILD:-0}" = "1" ]; then
+  if [ -n "$STAMP" ]; then
+    echo "Harness changed since the image was built. Rebuilding $IMAGE..."
+  else
+    echo "Building $IMAGE..."
+  fi
+  docker build --label "aaas.src=$HASH" -t "$IMAGE" "$HERE"
   echo ""
 fi
 
