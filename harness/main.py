@@ -287,6 +287,13 @@ async def run(args: argparse.Namespace) -> int:
                                 if rendered:
                                     status.write(rendered)
                         elif isinstance(msg, ResultMessage):
+                            # Recorded so a run can be resumed or forked later.
+                            # Note this is necessary but not sufficient: the CLI
+                            # keeps session transcripts under ~/.claude, which
+                            # `docker run --rm` discards, and keys them by working
+                            # directory, which is unique per run. See README.
+                            if msg.session_id:
+                                record.metadata.setdefault("session_id", msg.session_id)
                             record.sdk_turns += msg.num_turns
                             record.cost_usd += msg.total_cost_usd or 0.0
                             if msg.is_error:

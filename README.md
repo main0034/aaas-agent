@@ -125,6 +125,28 @@ identity that was never tested, so test these:
 The image build itself is the one step never executed here — if it fails, the
 GitHub CLI apt repository is the likely place.
 
+## Resuming a run
+
+Not currently possible, for two reasons that both need fixing:
+
+1. **The session store is thrown away.** The CLI keeps transcripts under
+   `~/.claude` inside the container, and `docker run --rm` deletes the container
+   filesystem on exit. Fix: mount a named volume at `/home/node/.claude`.
+2. **The session is keyed by working directory**, and every run works in
+   `runs/<run_id>/workspace/aaas-deployments`, which is unique. Even with the
+   store persisted, a new run would not find the old session. Fix: resume by
+   explicit id rather than by directory.
+
+The run record now captures `session_id`, so runs from here on are resumable
+once the above is built. `ClaudeAgentOptions` already takes `resume` and
+`fork_session`, so the harness change is small; the container change is the
+real work.
+
+Before building it, note what finding 14 measured: **a follow-up turn costs
+about as much as the original work**, because it re-reads the whole context. A
+resumed session is not a cheap way to make a small change. For anything a single
+`gh` command does, run the command.
+
 ## Known gaps
 
 - **The container has general network access.** It needs `api.anthropic.com` and
