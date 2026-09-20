@@ -40,8 +40,16 @@ for path in "$HOME/.azure" "$HOME/.aws" "$HOME/.config/gcloud"; do
 done
 
 # 4. The two things that must be present.
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  err "ANTHROPIC_API_KEY is not set. Export it on the host before running run.sh."
+# Either credential is fine. The subscription token is the cheaper one for a
+# POC; the API key is the one a product would have to use, because Anthropic
+# restricts subscription OAuth to individual use. See the README.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+  auth="subscription (CLAUDE_CODE_OAUTH_TOKEN)"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  auth="API key (ANTHROPIC_API_KEY)"
+else
+  auth=""
+  err "No Anthropic credential. Set CLAUDE_CODE_OAUTH_TOKEN (from \`claude setup-token\`) or ANTHROPIC_API_KEY."
 fi
 if [ -z "${GH_TOKEN:-}" ]; then
   err "GH_TOKEN is not set. The agent needs a token scoped to the deployments repo."
@@ -60,6 +68,7 @@ if [ "$fail" -ne 0 ]; then
 fi
 
 echo "  [ok]   no cloud CLI, no cloud credentials, tokens present"
+echo "  [ok]   Anthropic auth: ${auth}"
 echo ""
 
 exec "$@"

@@ -172,6 +172,7 @@ async def run(args: argparse.Namespace) -> int:
             "deployments HEAD": ws.head_sha(workspace.deployments),
             "runbook": runbook,
             "model": args.model or "(CLI default)",
+            "auth": "subscription" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") else "api-key",
         },
     )
 

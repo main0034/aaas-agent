@@ -22,8 +22,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNS_DIR="${AAAS_RUNS_DIR:-$HERE/runs}"
 
 missing=0
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ANTHROPIC_API_KEY is not set." >&2
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  cat >&2 <<'EOF'
+No Anthropic credential.
+
+If you have a Claude subscription and no API billing, generate a long-lived
+token once - it lasts a year and does not consume API credit:
+
+  claude setup-token
+  export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+
+Anthropic restricts subscription OAuth to INDIVIDUAL use. That covers proving
+this POC on your own machine. It does not cover AaaS serving customers - the
+agent plane needs API billing the moment there is a second person, which is a
+cost line the product model does not currently have.
+
+Otherwise: export ANTHROPIC_API_KEY=sk-ant-...
+EOF
   missing=1
 fi
 if [ -z "${GH_TOKEN:-}" ]; then
@@ -54,7 +69,8 @@ mkdir -p "$RUNS_DIR"
 
 # Two variables in, one directory mounted, nothing else.
 exec docker run --rm -it \
-  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+  -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e AAAS_GITHUB_OWNER="${AAAS_GITHUB_OWNER:-main0034}" \
   -v "$RUNS_DIR:/work/runs" \

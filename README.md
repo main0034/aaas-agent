@@ -30,11 +30,22 @@ pip install -r requirements-dev.txt && pytest -q     # 38 tests, no container ne
 ## Running it
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+claude setup-token                      # once; one-year token, no API billing
+export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 export GH_TOKEN=github_pat_...          # see below
 
 ./run.sh --request @briefs/room-booking.md
 ```
+
+`ANTHROPIC_API_KEY` works too and takes precedence; either is accepted.
+
+**The subscription token has a licence boundary worth knowing about.** Anthropic
+restricts subscription OAuth to *individual* use — it covers one person proving
+this on their own machine, and it does not cover AaaS running agents on behalf
+of customers. The product needs API billing from the first customer onward, so
+**per-customer agent inference is a COGS line the cost model does not currently
+have.** Worth pricing before the tiers in OQ-1a are set, because it scales with
+usage in a way the infrastructure floor does not.
 
 Interactive by default: when the agent finishes a turn you get a prompt, so it
 can ask for `owner` and `costCenter` the way the runbook tells it to. A blank
