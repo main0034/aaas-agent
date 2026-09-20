@@ -10,15 +10,21 @@
 # layer's refusal of ad-hoc network calls is backed by the binary genuinely not
 # being there.
 #
-# Runs as root on purpose. There is nothing in here worth escalating to - two
-# scoped tokens and a scratch clone - and a non-root user buys a uid-mismatch
-# class of bind-mount failure on macOS that would cost more time than it saves.
+# Runs as the image's existing non-root `node` user (uid 1000).
+#
+# This was root at first, on the reasoning that there is nothing in here worth
+# escalating to and a non-root user risks uid-mismatch pain on macOS bind
+# mounts. That reasoning was wrong in a way that had nothing to do with
+# security: the Claude Code CLI refuses to run with skipped permissions as
+# root, so the harness could not start at all. The papercut being avoided was
+# hypothetical and the blocker was real.
 
 FROM node:22-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DISABLE_AUTOUPDATER=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg git jq python3 python3-pip less \
@@ -42,8 +48,18 @@ RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
 COPY scripts/verify-isolation /usr/local/bin/verify-isolation
 RUN chmod +x /usr/local/bin/verify-isolation
 
+# Two disposable-container conveniences, set before dropping privileges:
+# --system so they apply to the node user, and safe.directory because a clone
+# on a bind mount can otherwise trip git's dubious-ownership check with an
+# error that says nothing about bind mounts.
+RUN git config --system --add safe.directory '*' \
+    && git config --system init.defaultBranch master
+
 WORKDIR /work
 COPY harness /work/harness
+RUN mkdir -p /work/runs && chown -R node:node /work
+
+USER node
 
 ENTRYPOINT ["/usr/local/bin/verify-isolation"]
 CMD ["python3", "-m", "harness.main", "--help"]

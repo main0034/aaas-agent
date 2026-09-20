@@ -39,7 +39,14 @@ for path in "$HOME/.azure" "$HOME/.aws" "$HOME/.config/gcloud"; do
   fi
 done
 
-# 4. The two things that must be present.
+# 4. Not root. The CLI refuses to skip permission prompts under root, and the
+#    resulting error points at Docker rather than at this Dockerfile. Assert it
+#    here so the cause is named where the fix is.
+if [ "$(id -u)" = "0" ]; then
+  err "running as root. The Claude Code CLI will not start with permissions skipped as root - the Dockerfile must end with 'USER node'."
+fi
+
+# 5. The two things that must be present.
 # Either credential is fine. The subscription token is the cheaper one for a
 # POC; the API key is the one a product would have to use, because Anthropic
 # restricts subscription OAuth to individual use. See the README.
