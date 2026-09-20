@@ -264,7 +264,27 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.request.startswith("@"):
-        args.request = Path(args.request[1:]).read_text(encoding="utf-8")
+        brief = Path(args.request[1:])
+        if not brief.is_file():
+            # This runs inside the container, where only a couple of host
+            # directories are mounted. A path that exists on the laptop is not
+            # automatically a path that exists here, and "No such file or
+            # directory" does not hint at that at all.
+            here = Path("briefs")
+            available = sorted(p.as_posix() for p in here.glob("*.md")) if here.is_dir() else []
+            print(
+                f"No such brief inside the container: {brief}\n"
+                f"run.sh mounts ./briefs (read-only) and ./runs, and nothing else - "
+                f"a file kept anywhere else on the host is not visible in here.\n"
+                + (
+                    "Available briefs: " + ", ".join(available)
+                    if available
+                    else "briefs/ is empty or not mounted."
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        args.request = brief.read_text(encoding="utf-8")
 
     return asyncio.run(run(args))
 

@@ -67,12 +67,16 @@ fi
 
 mkdir -p "$RUNS_DIR"
 
-# Two variables in, one directory mounted, nothing else.
+# Two credentials in. runs/ writable for the record, briefs/ read-only so a
+# request can be kept in a file and edited without rebuilding the image.
+# Nothing else is mounted: a path that exists on the laptop does not exist in
+# here unless it appears on this list.
 exec docker run --rm -it \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
   -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e AAAS_GITHUB_OWNER="${AAAS_GITHUB_OWNER:-main0034}" \
   -v "$RUNS_DIR:/work/runs" \
+  -v "$HERE/briefs:/work/briefs:ro" \
   "$IMAGE" \
   python3 -m harness.main --runs-dir /work/runs "$@"

@@ -27,6 +27,10 @@ runs/                     transcripts and reports (gitignored)
 pip install -r requirements-dev.txt && pytest -q     # 38 tests, no container needed
 ```
 
+Use a venv - macOS Python is externally managed. Note the container runs Python 3.11
+(Debian bookworm) while your local is likely newer, so local green is not container green.
+`policy.py` is pure stdlib, so this matters less than it would otherwise.
+
 ## Running it
 
 ```bash
