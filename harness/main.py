@@ -112,6 +112,85 @@ def render_block(block) -> str:  # noqa: ANN001
     return ""
 
 
+class StatusLine:
+    """A heartbeat printed while the agent is thinking.
+
+    Silence and a hang look identical from the outside, and a single turn can
+    spend a minute deciding what to do before it emits a visible token. The
+    first run of this harness produced 85 seconds of nothing after the prompt
+    was sent, which is long enough to conclude something is broken and reach
+    for Ctrl-C.
+
+    Prints on the same line and erases itself before any real output, so the
+    transcript stays clean.
+    """
+
+    def __init__(self, idle_after: float = 2.0) -> None:
+        self._task: asyncio.Task | None = None
+        self._idle_after = idle_after
+        self._started = 0.0
+        self._last = 0.0
+        self._shown = False
+
+    def start(self) -> None:
+        self._started = self._last = time.time()
+        self._task = asyncio.create_task(self._beat())
+
+    async def _beat(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.4)
+                if time.time() - self._last >= self._idle_after:
+                    elapsed = int(time.time() - self._started)
+                    sys.stdout.write(f"\r\033[2m  working... {elapsed}s\033[0m\033[K")
+                    sys.stdout.flush()
+                    self._shown = True
+        except asyncio.CancelledError:
+            pass
+
+    def _erase(self) -> None:
+        if self._shown:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+            self._shown = False
+
+    def write(self, text: str) -> None:
+        self._erase()
+        print(text)
+        self._last = time.time()
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        self._erase()
+
+
+def read_followup() -> str | None:
+    """Return the next message, or None to end the session.
+
+    A blank line deliberately does NOT end the session. It used to, and a stray
+    Enter while waiting then closed a run that had real work in it. Ending is
+    now something you have to mean.
+    """
+    while True:
+        try:
+            raw = input("\n\033[1mYou\033[0m  (type 'done' to finish): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if raw.lower() in {"done", "exit", "quit", "/done", "/exit", "/quit"}:
+            return None
+        if raw:
+            print()
+            return raw
+        print("\033[2m  (blank line ignored - type 'done' when you want to stop)\033[0m")
+
+
 async def run(args: argparse.Namespace) -> int:
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(args.runs_dir) / run_id
@@ -182,53 +261,66 @@ async def run(args: argparse.Namespace) -> int:
     message = args.request
     exit_code = 0
 
-    async with ClaudeSDKClient(options=options) as client:
-        while True:
-            record.start_turn()
-            await client.query(message)
+    status = StatusLine()
 
-            async for msg in client.receive_response():
-                record.append_message(msg)
+    # try/finally: an interrupted run should still leave a report behind. The
+    # transcript is written as it goes, but the timings and refusal list are
+    # only assembled at the end.
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            while True:
+                turn = record.start_turn()
+                await client.query(message)
+                status.start()
 
-                if isinstance(msg, AssistantMessage):
-                    for block in msg.content:
-                        if isinstance(block, ToolUseBlock):
-                            record.note_tool(block.name)
-                        if isinstance(block, TextBlock):
-                            record.note_text(block.text)
-                        rendered = render_block(block)
-                        if rendered:
-                            print(rendered)
-                elif isinstance(msg, ResultMessage):
-                    record.sdk_turns += msg.num_turns
-                    record.cost_usd += msg.total_cost_usd or 0.0
-                    if msg.is_error:
-                        record.errors.append(msg.result or "unknown error")
-                        exit_code = 1
-                    if msg.result:
-                        record.note_text(msg.result)
-                elif isinstance(msg, SystemMessage) and msg.subtype == "error":
-                    record.errors.append(str(msg.data))
+                try:
+                    async for msg in client.receive_response():
+                        record.append_message(msg)
 
-            record.end_turn()
-            print("\033[1m" + "─" * 72 + "\033[0m")
+                        if isinstance(msg, AssistantMessage):
+                            for block in msg.content:
+                                if isinstance(block, ToolUseBlock):
+                                    record.note_tool(block.name)
+                                if isinstance(block, TextBlock):
+                                    record.note_text(block.text)
+                                rendered = render_block(block)
+                                if rendered:
+                                    status.write(rendered)
+                        elif isinstance(msg, ResultMessage):
+                            record.sdk_turns += msg.num_turns
+                            record.cost_usd += msg.total_cost_usd or 0.0
+                            if msg.is_error:
+                                record.errors.append(msg.result or "unknown error")
+                                exit_code = 1
+                            if msg.result:
+                                record.note_text(msg.result)
+                        elif isinstance(msg, SystemMessage) and msg.subtype == "error":
+                            record.errors.append(str(msg.data))
+                finally:
+                    await status.stop()
 
-            if args.non_interactive:
-                break
+                record.end_turn()
+                print(
+                    f"\033[2m  exchange {turn.index}: {turn.seconds:.0f}s, "
+                    f"${record.cost_usd:.4f} so far\033[0m"
+                )
+                print("\033[1m" + "─" * 72 + "\033[0m")
 
-            try:
-                message = input("\n\033[1mYou\033[0m (blank to finish): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                break
-            if not message:
-                break
-            print()
+                if args.non_interactive:
+                    break
 
-    record.finish(policy.denials)
+                followup = read_followup()
+                if followup is None:
+                    break
+                message = followup
+    finally:
+        record.finish(policy.denials)
 
     minutes, seconds = divmod(int(record.seconds), 60)
-    print(f"\n\033[1mDone in {minutes}m {seconds}s\033[0m — ${record.cost_usd:.4f}, {len(record.turns)} turns")
+    print(
+        f"\n\033[1mDone in {minutes}m {seconds}s\033[0m - ${record.cost_usd:.4f}, "
+        f"{len(record.turns)} exchange(s), {record.sdk_turns} model turns"
+    )
     if record.pr_urls:
         for url in record.pr_urls:
             print(f"  PR: {url}")
