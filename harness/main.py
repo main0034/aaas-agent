@@ -46,7 +46,12 @@ from claude_agent_sdk import (
 )
 
 from . import workspace as ws
-from .policy import ToolPolicy, make_pre_tool_use_hook
+from .policy import (
+    APP_PROTECTED_GLOBS,
+    DEPLOYMENTS_PROTECTED_GLOBS,
+    ToolPolicy,
+    make_pre_tool_use_hook,
+)
 from .report import RunRecord
 
 ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite"]
@@ -59,6 +64,8 @@ TASKS = {
 
 
 def briefing(task: str, workspace: ws.Workspace, runbook: str) -> str:
+    if task == "create-app":
+        return app_briefing(workspace, runbook)
     return f"""
 # Workspace
 
@@ -98,6 +105,47 @@ are blocked and can say precisely what is blocking you. Do not merge anything.
 
 If you need something from the requester that you cannot infer - `owner` and
 `costCenter` above all - ask for it plainly and wait. Asking is not failing.
+""".strip()
+
+
+def app_briefing(workspace: ws.Workspace, runbook: str) -> str:
+    return f"""
+# Workspace
+
+You are running in a container. Nothing here is on anyone's laptop, and there is
+no Azure credential anywhere in this environment - not a service principal, not
+an `az` login, not an environment variable. That is deliberate and it is the
+reason the design is safe, so do not go looking for one.
+
+| Path | You may |
+|---|---|
+| `{workspace.app}` | read and write, except the guardrail paths below. Your working directory |
+| `{workspace.deployments}` | read only - the runbook and the deployment this app feeds |
+| `{workspace.reference}` | read only - reference copies of the other repositories |
+| `/tmp` | write scratch files, such as a pull request body |
+
+Guardrail paths inside the application checkout - the ones `AGENT.md` lists
+under "Do not edit these", plus `dotnet-tools.json` - are readable and not
+writable. If one of them looks wrong, say so and stop.
+
+Your shell has `git`, `gh`, `jq` and `dotnet` (the .NET SDK the repository's
+`global.json` pins, and the `dotnet-ef` tool after `dotnet tool restore`). There
+is no database, no `terraform` and no `az`. Use the Write and Edit tools to
+change files rather than shell redirection - shell redirection is refused.
+
+# Your task
+
+Follow `{workspace.deployments}/{runbook}`, exactly. Read it before you start. It
+is the runbook, not a summary of one. The application repository is
+`{workspace.app.name if workspace.app else ''}`, already cloned at `{workspace.app}`.
+
+# When to stop
+
+Stop when you have opened the pull request and can report its URL, or when you
+are blocked and can say precisely what is blocking you. Do not merge anything.
+
+If the request leaves something about the data model genuinely open, ask
+plainly and wait. Asking is not failing.
 """.strip()
 
 
@@ -197,8 +245,16 @@ async def run(args: argparse.Namespace) -> int:
     print(f"\033[1mRun {run_id}\033[0m  ({run_dir})\n")
 
     print("Preparing workspace…")
+    if args.task == "create-app" and not args.app_repo:
+        print("\033[31m--task create-app needs --app-repo <name>.\033[0m", file=sys.stderr)
+        return 2
+
     try:
-        workspace = ws.prepare(run_dir / "workspace", owner=args.owner)
+        workspace = ws.prepare(
+            run_dir / "workspace",
+            owner=args.owner,
+            app_repo=args.app_repo if args.task == "create-app" else None,
+        )
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
         return 2
@@ -220,7 +276,14 @@ async def run(args: argparse.Namespace) -> int:
     # /tmp is writable because the runbooks tell the agent to compose a PR body
     # in a file - a heredoc inside an argument is a reliable way to produce a
     # confusing shell error, which is why release.yml does the same thing.
-    policy = ToolPolicy(writable_roots=[*workspace.writable_roots, Path("/tmp")])
+    policy = ToolPolicy(
+        writable_roots=[*workspace.writable_roots, Path("/tmp")],
+        protected_globs=APP_PROTECTED_GLOBS if workspace.app else DEPLOYMENTS_PROTECTED_GLOBS,
+    )
+    workdir = workspace.app or workspace.deployments
+    read_only_dirs = [str(workspace.reference)]
+    if workspace.app:
+        read_only_dirs.append(str(workspace.deployments))
 
     options = ClaudeAgentOptions(
         system_prompt={
@@ -234,8 +297,8 @@ async def run(args: argparse.Namespace) -> int:
         hooks={
             "PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(policy)])],
         },
-        cwd=str(workspace.deployments),
-        add_dirs=[str(workspace.reference)],
+        cwd=str(workdir),
+        add_dirs=read_only_dirs,
         max_turns=args.max_turns,
         model=args.model,
         setting_sources=None,
@@ -249,13 +312,18 @@ async def run(args: argparse.Namespace) -> int:
         request=args.request,
         metadata={
             "deployments HEAD": ws.head_sha(workspace.deployments),
+            **(
+                {f"{workspace.app.name} HEAD": ws.head_sha(workspace.app)}
+                if workspace.app
+                else {}
+            ),
             "runbook": runbook,
             "model": args.model or "(CLI default)",
             "auth": "subscription" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") else "api-key",
         },
     )
 
-    print(f"Workspace ready at {workspace.deployments}\n")
+    print(f"Workspace ready at {workdir}\n")
     print("\033[1m" + "─" * 72 + "\033[0m")
 
     message = args.request
@@ -348,6 +416,12 @@ def main() -> int:
         "--request",
         required=True,
         help="The request, or @path to read it from a file.",
+    )
+    parser.add_argument(
+        "--app-repo",
+        default=None,
+        help="Application repository for --task create-app, e.g. aaas-app-demo. It must "
+        "already exist; creating it is provisioning, not agent work.",
     )
     parser.add_argument("--owner", default=os.environ.get("AAAS_GITHUB_OWNER", "main0034"))
     parser.add_argument("--runs-dir", default=os.environ.get("AAAS_RUNS_DIR", "runs"))

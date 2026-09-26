@@ -37,11 +37,17 @@ class Workspace:
     root: Path
     deployments: Path
     reference: Path
+    # The application checkout, for the create-app task. None for create-deployment.
+    app: Path | None = None
 
     @property
     def writable_roots(self) -> list[Path]:
-        # Only the deployments checkout. Within it, policy.py still refuses the
-        # guardrail paths.
+        # Exactly one checkout is writable per task. create-app writes the
+        # application and only reads the deployments repo (for the runbook and
+        # PROMPT.md); create-deployment is the other way round. Within the
+        # writable checkout, policy.py still refuses the guardrail paths.
+        if self.app is not None:
+            return [self.app]
         return [self.deployments]
 
 
@@ -72,6 +78,7 @@ def prepare(
     owner: str,
     deployments_repo: str = "aaas-deployments",
     modules_repo: str = "aaas-infra-modules",
+    app_repo: str | None = None,
 ) -> Workspace:
     if not os.environ.get("GH_TOKEN"):
         raise WorkspaceError(
@@ -91,7 +98,15 @@ def prepare(
     reference_root.mkdir(parents=True, exist_ok=True)
     _clone(owner, modules_repo, reference_root / modules_repo)
 
-    return Workspace(root=root, deployments=deployments, reference=reference_root)
+    app = None
+    if app_repo:
+        # The repository must already exist - create-app.md section 0. Cloning
+        # fails legibly here if it does not, before the agent spends a turn.
+        app = _clone(owner, app_repo, root / app_repo)
+        _run(["git", "config", "user.name", GIT_USER_NAME], cwd=app)
+        _run(["git", "config", "user.email", GIT_USER_EMAIL], cwd=app)
+
+    return Workspace(root=root, deployments=deployments, reference=reference_root, app=app)
 
 
 def head_sha(repo: Path) -> str:

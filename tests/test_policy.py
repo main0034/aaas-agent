@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.policy import ToolPolicy
+from harness.policy import APP_PROTECTED_GLOBS, ToolPolicy
 
 DEPLOYMENTS = Path("/work/runs/x/workspace/aaas-deployments")
 REFERENCE = Path("/work/runs/x/workspace/reference")
@@ -109,3 +109,84 @@ def test_denials_are_recorded(policy: ToolPolicy) -> None:
     policy.check("Bash", {"command": "az login"})
     assert len(policy.denials) == 2
     assert all(d.reason for d in policy.denials), "every refusal must say why"
+
+
+# --------------------------------------------------------------------------
+# create-app: dotnet, and the application checkout's guardrails
+# --------------------------------------------------------------------------
+
+APP = Path("/work/runs/x/workspace/aaas-app-demo")
+
+
+@pytest.fixture()
+def app_policy() -> ToolPolicy:
+    return ToolPolicy(writable_roots=[APP, Path("/tmp")], protected_globs=APP_PROTECTED_GLOBS)
+
+
+@pytest.mark.parametrize(
+    ("command", "allowed"),
+    [
+        # Every dotnet command create-app.md names.
+        ("dotnet restore && dotnet tool restore", True),
+        ("dotnet ef migrations add AddItemNotes --project src/App", True),
+        ("dotnet format", True),
+        ("dotnet build -c Release", True),
+        ("dotnet test -c Release --no-build", True),
+        (
+            "dotnet ef migrations has-pending-model-changes --project src/App "
+            "--no-build --configuration Release",
+            True,
+        ),
+        ("dotnet restore --locked-mode", True),
+        ("dotnet format --verify-no-changes --no-restore", True),
+        ("dotnet test -c Release 2>&1 | tail -40", True),
+        ("dotnet --info", True),
+        ("dotnet ef migrations list --project src/App", True),
+        ("dotnet add src/App package Humanizer --version 2.14.1", True),
+        # Refused: off the runbook's path, or a change to what is pinned.
+        ("dotnet", False),
+        ("dotnet new webapi", False),
+        ("dotnet run --project src/App", False),
+        ("dotnet tool install -g dotnet-ef", False),
+        ("dotnet tool update dotnet-ef", False),
+        ("dotnet nuget add source https://example.com/v3/index.json", False),
+        ("dotnet ef database update", False),
+        ("dotnet ef dbcontext scaffold x", False),
+        ("dotnet add src/App package Humanizer", False),
+        ("dotnet add src/App reference ../Other", False),
+        ("dotnet workload install aspire", False),
+        ("dotnet publish -c Release", False),
+    ],
+)
+def test_dotnet(app_policy: ToolPolicy, command: str, allowed: bool) -> None:
+    decision = app_policy.check("Bash", {"command": command})
+    assert decision.allow is allowed, f"{command!r}: {decision.reason}"
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        (APP / "src/App/Program.cs", True),
+        (APP / "src/App/Endpoints/Notes.cs", True),
+        (APP / "tests/App.Tests/NotesTests.cs", True),
+        (APP / "Directory.Packages.props", True),
+        (APP / "src/App/packages.lock.json", True),
+        (Path("/tmp/pr-body.md"), True),
+        # AGENT.md's "Do not edit these", plus the tool manifest.
+        (APP / "Dockerfile", False),
+        (APP / ".github/workflows/ci.yml", False),
+        (APP / "scripts/check-migrations.sh", False),
+        (APP / "Directory.Build.props", False),
+        (APP / "global.json", False),
+        (APP / ".editorconfig", False),
+        (APP / ".aaas/deployment", False),
+        (APP / "AGENT.md", False),
+        (APP / "dotnet-tools.json", False),
+        # create-app reads the deployments repo; it does not write it.
+        (DEPLOYMENTS / "deployments/dev/demo/terraform.tfvars.json", False),
+        (DEPLOYMENTS / "agent/create-app.md", False),
+    ],
+)
+def test_app_writes(app_policy: ToolPolicy, path: Path, allowed: bool) -> None:
+    decision = app_policy.check("Write", {"file_path": str(path)})
+    assert decision.allow is allowed, f"{path}: {decision.reason}"

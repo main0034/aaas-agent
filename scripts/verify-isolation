@@ -67,6 +67,11 @@ fi
 if ! command -v gh >/dev/null 2>&1; then
   err "gh is missing."
 fi
+# create-app needs the SDK. Its absence would otherwise surface as the agent
+# being refused nothing and failing everything.
+if ! command -v dotnet >/dev/null 2>&1; then
+  err "dotnet is missing; the create-app runbook cannot be followed."
+fi
 
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
@@ -76,6 +81,7 @@ fi
 
 echo "  [ok]   no cloud CLI, no cloud credentials, tokens present"
 echo "  [ok]   Anthropic auth: ${auth}"
+echo "  [ok]   .NET SDK $(dotnet --version 2>/dev/null)"
 echo ""
 
 exec "$@"

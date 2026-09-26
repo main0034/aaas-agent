@@ -45,8 +45,11 @@ if [ -z "${GH_TOKEN:-}" ]; then
   cat >&2 <<'EOF'
 GH_TOKEN is not set.
 
-Use a fine-grained personal access token scoped to aaas-deployments only, with
-Contents: read and write, and Pull requests: read and write. Nothing else.
+Use a fine-grained personal access token scoped to the repositories the task
+touches - aaas-deployments, plus the application repository for create-app -
+with Contents: read and write, and Pull requests: read and write. Never
+Workflows: without it, GitHub itself refuses any push under .github/workflows/
+(FINDINGS.md #19), which is the one guarantee here nobody has to trust.
 
   export GH_TOKEN=github_pat_...
 

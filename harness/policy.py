@@ -29,6 +29,15 @@ The actual containment is two things, in this order:
 So: rules below = fewer wasted turns and clearer failures. Container +
 credential absence = the boundary. Keep the two ideas apart.
 
+`dotnet` makes this more true, not less. The create-app runbook requires
+`dotnet build` and `dotnet test`, and both execute arbitrary code by design:
+MSBuild targets run at build time, and a test is a program the agent wrote.
+There is no subcommand list that narrows that. What the agent can reach from
+inside that code is exactly what the container gives it - no Azure credential,
+no `az`, network egress (NuGet needs it), and `GH_TOKEN`. The subcommand rules
+below keep the agent on the runbook's path; the blast radius is set by the
+token's permissions, which GitHub enforces (FINDINGS.md #19, point 5).
+
 The narrowing that *is* worth having: `python3` is restricted to running the
 validation script. That closes the widest hole for the price of one regex,
 and jq covers everything else the runbook actually asks for.
@@ -80,6 +89,7 @@ ALLOWED_COMMANDS: set[str] = {
     "env",
     "which",
     "command",
+    "dotnet",
 }
 
 # Named explicitly so the refusal can say *why*, rather than "not in allowlist".
@@ -153,6 +163,50 @@ DENIED_GH_SUBCOMMANDS: dict[str, str] = {
 # the deployment task; repo creation is a provisioning step the harness does.
 ALLOWED_GH_REPO_SUBCOMMANDS: set[str] = {"view", "clone", "list"}
 
+# dotnet: the subcommands the create-app runbook names, and read-only ones.
+# Everything else is refused with a reason. `new` is refused outright: the app
+# repository already exists and is created from the template by provisioning.
+ALLOWED_DOTNET_SUBCOMMANDS: set[str] = {
+    "build",
+    "test",
+    "format",
+    "restore",
+    "clean",
+    "--info",
+    "--version",
+    "--list-sdks",
+}
+DENIED_DOTNET_SUBCOMMANDS: dict[str, str] = {
+    "new": (
+        "The application repository already exists and was created from the "
+        "template. Add files with the Write tool."
+    ),
+    "nuget": (
+        "Package sources and signing are fixed by the repository. Packages come "
+        "from nuget.org through `dotnet restore`."
+    ),
+    "run": (
+        "Running the app needs the database, which you do not have. Prove behaviour "
+        "with `dotnet test`; CI smoke-tests the container."
+    ),
+    "publish": "Images are built by CI on merge. There is nothing to publish here.",
+    "pack": "Nothing in this repository is a package.",
+    "sln": "The solution structure is part of the template.",
+    "workload": "The SDK is fixed at image build time.",
+    "dev-certs": "Not needed: TLS terminates at the platform.",
+    "user-secrets": "There are no secrets in this application, by design (D-14).",
+}
+# `dotnet tool` only to restore the pinned tool manifest (dotnet-ef).
+ALLOWED_DOTNET_TOOL_SUBCOMMANDS: set[str] = {"restore", "list"}
+# `dotnet ef`: migrations only, and never against a database.
+ALLOWED_DOTNET_EF_MIGRATIONS: set[str] = {
+    "add",
+    "remove",
+    "list",
+    "script",
+    "has-pending-model-changes",
+}
+
 # python3 exists solely to run the schema validator.
 VALIDATOR_RE = re.compile(r"(^|/)scripts/validate_deployment\.py$")
 
@@ -162,6 +216,29 @@ REDIRECT_RE = re.compile(r"(?<![0-9<>])>{1,2}(?!&)")
 SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+# Guardrail paths inside an application checkout. Mirrors the "Do not edit these"
+# table in the template's AGENT.md.
+APP_PROTECTED_GLOBS: tuple[str, ...] = (
+    "Dockerfile",
+    ".github/",
+    "scripts/",
+    "Directory.Build.props",
+    "global.json",
+    ".editorconfig",
+    ".aaas/",
+    "AGENT.md",
+    "dotnet-tools.json",
+)
+
+DEPLOYMENTS_PROTECTED_GLOBS: tuple[str, ...] = (
+    "schemas/",
+    "scripts/",
+    ".github/",
+    "agent/",
+    "AGENT.md",
+)
 
 
 @dataclass
@@ -190,13 +267,7 @@ class ToolPolicy:
     """
 
     writable_roots: list[Path]
-    protected_globs: tuple[str, ...] = (
-        "schemas/",
-        "scripts/",
-        ".github/",
-        "agent/",
-        "AGENT.md",
-    )
+    protected_globs: tuple[str, ...] = DEPLOYMENTS_PROTECTED_GLOBS
     denials: list[Denial] = field(default_factory=list)
 
     # -- entry point -------------------------------------------------------
@@ -267,9 +338,9 @@ class ToolPolicy:
         if program not in ALLOWED_COMMANDS:
             return Decision(
                 False,
-                f"`{program}` is not one of the commands available here. The runbook "
-                f"uses git, gh, jq and python3; if you need something else, stop and "
-                f"say what and why.",
+                f"`{program}` is not one of the commands available here. The runbooks "
+                f"use git, gh, jq, dotnet and python3; if you need something else, stop "
+                f"and say what and why.",
             )
 
         if program == "python3":
@@ -278,6 +349,8 @@ class ToolPolicy:
             return self._check_gh(tokens)
         if program == "git":
             return self._check_git(tokens)
+        if program == "dotnet":
+            return self._check_dotnet(tokens)
 
         return Decision(True)
 
@@ -324,6 +397,58 @@ class ToolPolicy:
                     "report the URL, and stop.",
                 )
         return Decision(True)
+
+    def _check_dotnet(self, tokens: list[str]) -> Decision:
+        if len(tokens) < 2:
+            return Decision(False, "Say which dotnet command: build, test, format, restore.")
+        sub = tokens[1]
+        if sub in DENIED_DOTNET_SUBCOMMANDS:
+            return Decision(False, f"`dotnet {sub}` is not available. {DENIED_DOTNET_SUBCOMMANDS[sub]}")
+        if sub in ALLOWED_DOTNET_SUBCOMMANDS:
+            return Decision(True)
+        if sub == "tool":
+            action = tokens[2] if len(tokens) > 2 else ""
+            if action in ALLOWED_DOTNET_TOOL_SUBCOMMANDS:
+                return Decision(True)
+            return Decision(
+                False,
+                f"`dotnet tool {action}` is not available. The tools this repository "
+                f"uses are pinned in dotnet-tools.json; run `dotnet tool restore`.",
+            )
+        if sub == "ef":
+            area = tokens[2] if len(tokens) > 2 else ""
+            action = tokens[3] if len(tokens) > 3 else ""
+            if area == "migrations" and action in ALLOWED_DOTNET_EF_MIGRATIONS:
+                return Decision(True)
+            if area == "database":
+                return Decision(
+                    False,
+                    "Migrations are applied by the platform's `migrate` init container "
+                    "before the new version starts, and by CI against a throwaway "
+                    "Postgres. You have no database, and never apply one yourself.",
+                )
+            return Decision(
+                False,
+                "`dotnet ef` is available for `migrations add|remove|list|script|"
+                "has-pending-model-changes` only.",
+            )
+        if sub == "add":
+            # `dotnet add [<project>] package <name> --version <v>`. Versions are
+            # pinned centrally; an unpinned add would float.
+            if "package" in tokens and "--version" in tokens:
+                return Decision(True)
+            if "package" in tokens:
+                return Decision(
+                    False,
+                    "Pin the version: `dotnet add <project> package <name> --version <v>`. "
+                    "Versions live in Directory.Packages.props.",
+                )
+            return Decision(False, "Project references are part of the template's structure.")
+        return Decision(
+            False,
+            f"`dotnet {sub}` is outside the runbook. The runbook uses restore, build, "
+            f"test, format, `tool restore` and `ef migrations`.",
+        )
 
     def _check_git(self, tokens: list[str]) -> Decision:
         args = [t for t in tokens[1:] if not t.startswith("-")]

@@ -24,7 +24,7 @@ runs/                     transcripts and reports (gitignored)
 ```
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q     # 38 tests, no container needed
+pip install -r requirements-dev.txt && pytest -q     # 79 tests, no container needed
 ```
 
 Use a venv - macOS Python is externally managed. Note the container runs Python 3.11
@@ -39,6 +39,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 export GH_TOKEN=github_pat_...          # see below
 
 ./run.sh --request @briefs/room-booking.md
+./run.sh --task create-app --app-repo aaas-app-demo --request @briefs/item-done.md --non-interactive
 ```
 
 `ANTHROPIC_API_KEY` works too and takes precedence; either is accepted.
@@ -63,8 +64,11 @@ tree it produced.
 
 ## The token
 
-A **fine-grained PAT scoped to `aaas-deployments` only**, with Contents and Pull
-requests set to read and write. Not your `gh auth` token — that carries your
+A **fine-grained PAT scoped to the repositories the task touches** -
+`aaas-deployments`, plus the application repository for `--task create-app` -
+with Contents and Pull requests set to read and write, and **no Workflows
+permission**. Without Workflows, GitHub refuses any push that touches
+`.github/workflows/`, whatever the agent's code does (FINDINGS.md #19). Not your `gh auth` token — that carries your
 whole account, and the entire point here is knowing exactly what the agent can
 reach.
 

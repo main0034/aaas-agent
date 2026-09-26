@@ -21,13 +21,30 @@
 
 FROM node:22-bookworm-slim
 
+# The .NET SDK the application template pins in global.json. Keep the two in
+# step: global.json says rollForward latestPatch, so an SDK from another feature
+# band (10.0.1xx, 10.0.3xx) is refused by `dotnet` with an error about
+# global.json rather than about this file.
+ARG DOTNET_SDK_VERSION=10.0.401
+
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    DISABLE_AUTOUPDATER=1
+    DISABLE_AUTOUPDATER=1 \
+    DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
+    NUGET_XMLDOC_MODE=skip
 
+# The SDK is installed with Microsoft's install script, while curl is still
+# here. It is the widest capability in the image: `dotnet build` and
+# `dotnet test` execute whatever code the agent writes, with network egress for
+# NuGet and GH_TOKEN in the environment. That is by design - the runbook's
+# evidence of correctness is passing tests - and it is why the policy layer is
+# not the boundary. See policy.py.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git jq python3 python3-pip less \
+        ca-certificates curl gnupg git jq python3 python3-pip less libicu72 \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -35,6 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends gh \
+    && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && bash /tmp/dotnet-install.sh --version "$DOTNET_SDK_VERSION" --install-dir "$DOTNET_ROOT" --no-path \
+    && ln -s "$DOTNET_ROOT/dotnet" /usr/local/bin/dotnet \
+    && rm /tmp/dotnet-install.sh \
     && apt-get purge -y curl gnupg \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
