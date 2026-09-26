@@ -217,6 +217,11 @@ SEGMENT_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# Any reference to the token. The first create-app run pushed to
+# https://user:${GH_TOKEN}@github.com/... after a credential problem; the policy
+# allowed it because ${VAR} is expansion, not substitution.
+TOKEN_REF_RE = re.compile(r"\$\{?GH_TOKEN\b|\bgh\s+auth\s+token\b")
+
 
 # Guardrail paths inside an application checkout. Mirrors the "Do not edit these"
 # table in the template's AGENT.md.
@@ -299,6 +304,15 @@ class ToolPolicy:
                 "Command substitution ($(...), backticks, process substitution) is not "
                 "allowed, because it hides the command actually being run from this "
                 "check. Run the steps separately.",
+            )
+
+        if TOKEN_REF_RE.search(command):
+            return Decision(
+                False,
+                "Do not handle GH_TOKEN yourself - not in a URL, a header or an "
+                "argument. git and gh already authenticate with it. If a push or a "
+                "gh command fails on authentication, stop and say so: that is a "
+                "harness problem, not something to work around.",
             )
 
         if REDIRECT_RE.search(command):

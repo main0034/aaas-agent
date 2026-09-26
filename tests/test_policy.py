@@ -156,6 +156,11 @@ def app_policy() -> ToolPolicy:
         ("dotnet add src/App reference ../Other", False),
         ("dotnet workload install aspire", False),
         ("dotnet publish -c Release", False),
+        # Found in run 20260926T142507Z: the token spliced into a push URL.
+        ("git push https://main0034:${GH_TOKEN}@github.com/main0034/x.git feat/y", False),
+        ("git push https://x:$GH_TOKEN@github.com/o/r.git b", False),
+        ("gh auth token", False),
+        ("gh auth status", True),
     ],
 )
 def test_dotnet(app_policy: ToolPolicy, command: str, allowed: bool) -> None:

@@ -67,9 +67,24 @@ def _run(cmd: list[str], cwd: Path | None = None) -> str:
 
 
 def _clone(owner: str, repo: str, dest: Path) -> Path:
-    """Clone with `gh` so the token in GH_TOKEN is used and never written to disk."""
+    """Clone with `gh` so the token in GH_TOKEN is used and never written to disk.
+
+    `gh repo clone` authenticates the clone and nothing after it: the checkout
+    has no credential helper, so the runbook's `git push` fails with "could not
+    read Username". The first create-app run spent five turns on that and ended
+    by pushing to a URL with ${GH_TOKEN} spliced into it (FINDINGS.md #21). The
+    fix is here, not in the agent: point git at gh as the helper, per repository,
+    so the token is read from the environment at push time and never lands in a
+    URL, an argument list or a config file.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
     _run(["gh", "repo", "clone", f"{owner}/{repo}", str(dest), "--", "--quiet"])
+    _run(["git", "config", "--local", "credential.https://github.com.helper", ""], cwd=dest)
+    _run(
+        ["git", "config", "--local", "--add", "credential.https://github.com.helper",
+         "!gh auth git-credential"],
+        cwd=dest,
+    )
     return dest
 
 
