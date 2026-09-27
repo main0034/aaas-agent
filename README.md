@@ -24,12 +24,18 @@ runs/                     transcripts and reports (gitignored)
 ```
 
 ```bash
-pip install -r requirements-dev.txt && pytest -q     # 79 tests, no container needed
+uv run pytest -q     # 83 tests, no container needed
 ```
 
-Use a venv - macOS Python is externally managed. Note the container runs Python 3.11
-(Debian bookworm) while your local is likely newer, so local green is not container green.
-`policy.py` is pure stdlib, so this matters less than it would otherwise.
+Dependencies are managed with [uv](https://docs.astral.sh/uv/): `pyproject.toml` declares
+them, `uv.lock` pins the whole tree with hashes, and both are what the image installs from.
+`pyproject.toml` requires Python 3.11 - the container's (Debian bookworm) - so `uv run`
+fetches and uses 3.11 locally and local green is container green. To change a dependency:
+`uv add <pkg>==<version>` (or `uv add --dev`), then commit `uv.lock`.
+
+The image contains neither `pip` nor `uv`: uv is mounted for the one build step that
+installs the lock into `/opt/venv`, and `verify-isolation` refuses to start if an
+installer is present.
 
 ## Running it
 
@@ -81,7 +87,8 @@ fuse; not worth building before the loop is proven.
 The tool policy in `policy.py` is a **guidance layer**, not a security boundary,
 and the file says so at the top. The agent has `python3` because it is required
 to run `scripts/validate_deployment.py`, and anything that can run Python can
-run `pip install azure-cli`. `python3` is therefore restricted to running the
+run `pip install azure-cli` (there is no pip in the image any more, but Python can
+fetch and run anything without it). `python3` is therefore restricted to running the
 validator — which closes the widest hole cheaply — but a command allowlist is
 never the thing to trust.
 
