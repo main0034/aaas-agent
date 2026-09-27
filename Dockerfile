@@ -20,6 +20,11 @@
 # root, so the harness could not start at all. The papercut being avoided was
 # hypothetical and the blocker was real.
 
+# uv, only as a source to bind-mount from in the dependency step below. A
+# --mount `from=` cannot take a build arg, hence a named stage.
+ARG UV_VERSION=0.12.13
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 FROM node:22-bookworm-slim
 
 # The .NET SDK the application template pins in global.json. Keep the two in
@@ -74,9 +79,8 @@ RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 #
 # UV_PYTHON_DOWNLOADS=never: use bookworm's 3.11 (pyproject says ==3.11.*), and
 # fail the build rather than quietly fetch a different interpreter.
-ARG UV_VERSION=0.12.13
 COPY pyproject.toml uv.lock /tmp/aaas-agent/
-RUN --mount=from=ghcr.io/astral-sh/uv:${UV_VERSION},source=/uv,target=/usr/local/bin/uv \
+RUN --mount=from=uv,source=/uv,target=/usr/local/bin/uv \
     UV_PROJECT_ENVIRONMENT=/opt/venv \
     UV_PYTHON=/usr/bin/python3 \
     UV_PYTHON_DOWNLOADS=never \
