@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # The agent's container.
 #
 # The point of this image is what is NOT in it. There is no `az`, no
@@ -29,7 +30,6 @@ ARG DOTNET_SDK_VERSION=10.0.401
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DISABLE_AUTOUPDATER=1 \
     DOTNET_ROOT=/usr/share/dotnet \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
@@ -44,7 +44,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # evidence of correctness is passing tests - and it is why the policy layer is
 # not the boundary. See policy.py.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg git jq python3 python3-pip less libicu72 \
+        ca-certificates curl gnupg git jq python3 less libicu72 \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -63,8 +63,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The SDK drives the Claude Code CLI, so the CLI has to be here.
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/requirements.txt
+# Python dependencies, from uv.lock, into a venv on Debian's own python3.
+#
+# uv is bind-mounted for this one step and never lands in the image, and the
+# venv is created without pip, and python3-pip is not installed. So nothing in
+# the running container can install a package - `pip install azure-cli` was the
+# widest hole the README described, and verify-isolation now asserts it is shut.
+# The lock pins the whole tree with hashes; requirements.txt pinned only the
+# two top-level packages and let everything underneath them float.
+#
+# UV_PYTHON_DOWNLOADS=never: use bookworm's 3.11 (pyproject says ==3.11.*), and
+# fail the build rather than quietly fetch a different interpreter.
+ARG UV_VERSION=0.12.13
+COPY pyproject.toml uv.lock /tmp/aaas-agent/
+RUN --mount=from=ghcr.io/astral-sh/uv:${UV_VERSION},source=/uv,target=/usr/local/bin/uv \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON=/usr/bin/python3 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    uv sync --locked --no-dev --project /tmp/aaas-agent \
+    && rm -rf /tmp/aaas-agent
+# First on PATH, so `python3` - the harness, and the agent running the
+# deployment validator - is the venv's interpreter with jsonschema importable.
+ENV PATH=/opt/venv/bin:$PATH
 
 # Explicit octal, not `chmod +x`.
 #

@@ -67,7 +67,7 @@ fi
 # than relying on remembering a flag, stamp the image with a hash of its sources
 # and rebuild whenever they differ. shasum is present on macOS and Linux both.
 src_hash() {
-  find "$HERE/harness" "$HERE/scripts" "$HERE/Dockerfile" "$HERE/requirements.txt" \
+  find "$HERE/harness" "$HERE/scripts" "$HERE/Dockerfile" "$HERE/pyproject.toml" "$HERE/uv.lock" \
     -type f 2>/dev/null | sort | xargs shasum 2>/dev/null | shasum | cut -d' ' -f1
 }
 HASH="$(src_hash)"

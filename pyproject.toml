@@ -1,0 +1,29 @@
+[project]
+name = "aaas-agent"
+version = "0.1.0"
+description = "The AaaS agent harness: one task, in a container, with a tool policy and a run record."
+readme = "README.md"
+# The container runs Debian bookworm's python3, which is 3.11. Pinning the
+# minor version here makes `uv run` locally use the same interpreter, so local
+# green means container green - which pip + whatever Python Homebrew had did not.
+requires-python = "==3.11.*"
+# Exact pins, for the same reason app images are pinned: a run that cannot be
+# reproduced is not a measurement. uv.lock pins everything these pull in, which
+# requirements.txt never did.
+dependencies = [
+    "claude-agent-sdk==0.1.73",
+    "jsonschema==4.26.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.uv]
+# The harness is run as `python -m harness.main`, not installed as a package.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

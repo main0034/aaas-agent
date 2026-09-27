@@ -24,6 +24,19 @@ for forbidden in az terraform terragrunt pulumi aws gcloud; do
   fi
 done
 
+# 1b. No package installer. The harness and the validator need Python, and
+#     Python can fetch anything, so this is not a boundary - but `pip install
+#     azure-cli` was the one-line route to a cloud CLI, and the image is built
+#     so that it does not exist. Assert that rather than trust it.
+for installer in pip pip3 uv uvx; do
+  if command -v "$installer" >/dev/null 2>&1; then
+    err "\`$installer\` is present in this image. Dependencies are installed at build time from uv.lock; nothing installs at run time."
+  fi
+done
+if python3 -m pip --version >/dev/null 2>&1; then
+  err "\`python3 -m pip\` works. The venv is built without pip and python3-pip must not be installed."
+fi
+
 # 2. No credentials in the environment. Checked by prefix rather than by name,
 #    because the failure mode is a variable nobody thought to list.
 leaked=$(env | grep -Ei '^(AZURE_|ARM_|AAD_|MSI_|IDENTITY_|AWS_|GOOGLE_)' | cut -d= -f1 || true)
@@ -73,13 +86,19 @@ if ! command -v dotnet >/dev/null 2>&1; then
   err "dotnet is missing; the create-app runbook cannot be followed."
 fi
 
+# The harness imports the SDK from the venv uv built. If PATH does not put that
+# venv first, python3 is Debian's and the failure is an ImportError at start.
+if ! python3 -c 'import claude_agent_sdk, jsonschema' >/dev/null 2>&1; then
+  err "python3 ($(command -v python3)) cannot import the harness dependencies; /opt/venv/bin must be first on PATH."
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "Refusing to start. The isolation this run depends on is not intact." >&2
   exit 1
 fi
 
-echo "  [ok]   no cloud CLI, no cloud credentials, tokens present"
+echo "  [ok]   no cloud CLI, no package installer, no cloud credentials, tokens present"
 echo "  [ok]   Anthropic auth: ${auth}"
 echo "  [ok]   .NET SDK $(dotnet --version 2>/dev/null)"
 echo ""

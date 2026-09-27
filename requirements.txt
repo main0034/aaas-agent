@@ -1,4 +1,0 @@
-# Pinned, for the same reason app images are pinned: a run that cannot be
-# reproduced is not a measurement.
-claude-agent-sdk==0.1.73
-jsonschema==4.26.0
