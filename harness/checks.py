@@ -119,38 +119,64 @@ def verdict(runs: Iterable[CheckRun], required: Iterable[str] = DEFAULT_REQUIRED
 
 # -- log trimming ------------------------------------------------------------
 
+# dotnet colours its test output. gh refuses to print a log containing escape
+# sequences unless told to, and the model should not have to read them either.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 _TIMESTAMP = re.compile(r"^﻿?\d{4}-\d\d-\d\dT[\d:.]+Z ?")
 _ERROR = re.compile(
     r"##\[error\]|\berror\b|\bFAILED\b|\bFailed\b|\[FAIL\]|Assert\.|Exception\b|exit code [1-9]",
 )
-_NOISE = re.compile(r"^##\[(group|endgroup)\]|^\s*$")
+_NOISE = re.compile(r"^##\[endgroup\]|^\s*$")
 
 
 def trim_log(text: str, *, before_first_error: int = 40, context: int = 4, max_lines: int = 200) -> str:
     """Cut a job log down to what a person would read to find the cause.
 
-    Keeps: a run-up before the first error line (the command that failed and its
-    output), a few lines around every later error line, and never more than
-    `max_lines`. Timestamps and group markers are dropped - they are most of a
-    raw Actions log and none of its meaning.
-    """
-    lines = [_TIMESTAMP.sub("", ln.rstrip()) for ln in text.splitlines()]
-    lines = [ln for ln in lines if not _NOISE.search(ln)]
-    hits = [i for i, ln in enumerate(lines) if _ERROR.search(ln)]
-    if not hits:
-        kept = lines[-max_lines:]
-        return "\n".join(kept)
+    An Actions log is a sequence of steps, each opened by `##[group]Run <cmd>`,
+    and the step that failed ends with `##[error]`. So: take the failing step
+    from its `Run` line to its first `##[error]`, plus any later `##[error]`
+    lines. A word search for "error" alone is not enough - the first run of
+    this trimmed on a CI step whose *script* contains the word, and handed the
+    agent 40 lines of git checkout noise (FINDINGS.md #23).
 
-    keep: set[int] = set(range(max(0, hits[0] - before_first_error), hits[0] + 1))
-    for i in hits:
-        keep.update(range(max(0, i - context), min(len(lines), i + context + 1)))
+    Within the step: its first lines (the command), a few lines around every
+    line that looks like a failure, and its tail, never more than `max_lines`.
+    Logs without `##[error]` fall back to the error-word heuristic, then to the
+    tail. Timestamps, colours and group markers are dropped.
+    """
+    lines = [_TIMESTAMP.sub("", _ANSI.sub("", ln).rstrip()) for ln in text.splitlines()]
+    errors = [i for i, ln in enumerate(lines) if "##[error]" in ln]
+
+    if errors:
+        first = errors[0]
+        start = next(
+            (i for i in range(first, -1, -1) if lines[i].startswith("##[group]Run ")),
+            max(0, first - before_first_error),
+        )
+        step = list(range(start, first + 1))
+        keep: set[int] = set(step[:12]) | set(step[-60:])
+        for i in step:
+            if _ERROR.search(lines[i]):
+                keep.update(range(max(start, i - context), min(first + 1, i + context + 1)))
+        keep.update(errors)
+    else:
+        hits = [i for i, ln in enumerate(lines) if _ERROR.search(ln)]
+        if not hits:
+            tail = [ln for ln in lines if not _NOISE.search(ln)]
+            return "\n".join(tail[-max_lines:])
+        keep = set(range(max(0, hits[0] - before_first_error), hits[0] + 1))
+        for i in hits:
+            keep.update(range(max(0, i - context), min(len(lines), i + context + 1)))
 
     out: list[str] = []
     previous = -2
     for i in sorted(keep):
+        line = lines[i]
+        if _NOISE.search(line):
+            continue
         if i != previous + 1 and out:
             out.append("   [...]")
-        out.append(lines[i])
+        out.append(line.replace("##[group]", "").replace("##[error]", "ERROR: "))
         previous = i
     if len(out) > max_lines:
         head = max_lines // 2
@@ -246,8 +272,11 @@ def check_runs(pr: PullRequest, sha: str, run: Runner = gh) -> list[CheckRun]:
 
 
 def job_log(pr: PullRequest, check: CheckRun, run: Runner = gh) -> str:
-    # For GitHub Actions a check run's id is its job id.
-    return run(["api", f"repos/{pr.slug}/actions/jobs/{check.id}/logs"])
+    # For GitHub Actions a check run's id is its job id. dotnet test colours its
+    # output, and without --allow-escape-sequences gh refuses to print the log at
+    # all - which is how the first fix round got no log (FINDINGS.md #23).
+    # trim_log strips the sequences.
+    return run(["api", "--allow-escape-sequences", f"repos/{pr.slug}/actions/jobs/{check.id}/logs"])
 
 
 def wait_for_checks(

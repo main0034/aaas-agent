@@ -83,18 +83,23 @@ if [ "$STAMP" != "$HASH" ] || [ "${AAAS_REBUILD:-0}" = "1" ]; then
   echo ""
 fi
 
-mkdir -p "$RUNS_DIR"
+# One run's directory in, not runs/. With the whole of runs/ mounted, a run on
+# 28 September read an earlier run's workspace and copied its solution - which
+# both leaks one run into another and makes the measurement worthless
+# (FINDINGS.md #23). The run id is chosen here so only that directory exists.
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$RUNS_DIR/$RUN_ID"
 
-# Two credentials in. runs/ writable for the record, briefs/ read-only so a
-# request can be kept in a file and edited without rebuilding the image.
-# Nothing else is mounted: a path that exists on the laptop does not exist in
-# here unless it appears on this list.
+# Two credentials in. This run's directory writable for the record, briefs/
+# read-only so a request can be kept in a file and edited without rebuilding
+# the image. Nothing else is mounted: a path that exists on the laptop does not
+# exist in here unless it appears on this list.
 exec docker run --rm -it \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
   -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e AAAS_GITHUB_OWNER="${AAAS_GITHUB_OWNER:-main0034}" \
-  -v "$RUNS_DIR:/work/runs" \
+  -v "$RUNS_DIR/$RUN_ID:/work/runs/$RUN_ID" \
   -v "$HERE/briefs:/work/briefs:ro" \
   "$IMAGE" \
-  python3 -m harness.main --runs-dir /work/runs "$@"
+  python3 -m harness.main --runs-dir /work/runs --run-id "$RUN_ID" "$@"

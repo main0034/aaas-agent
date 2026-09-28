@@ -88,7 +88,10 @@ RAW = "\n".join(
         "﻿2026-09-28T10:00:00.0000000Z ##[group]Run dotnet restore",
         *[f"2026-09-28T10:00:01.0000000Z restoring package {i}" for i in range(300)],
         "2026-09-28T10:00:02.0000000Z ##[endgroup]",
-        "2026-09-28T10:00:03.0000000Z Run grep for forbidden test providers",
+        "2026-09-28T10:00:02.5000000Z ##[group]Run actions/checkout@v4",
+        "2026-09-28T10:00:02.6000000Z echo 'on error, print ::error:: and exit'",
+        "2026-09-28T10:00:02.7000000Z ##[endgroup]",
+        "2026-09-28T10:00:03.0000000Z ##[group]Run grep for forbidden test providers",
         "2026-09-28T10:00:03.1000000Z tests/App.Tests/App.Tests.csproj:10: EntityFrameworkCore.InMemory",
         "2026-09-28T10:00:03.2000000Z ##[error]The EF in-memory provider is forbidden - see AGENT.md",
         "2026-09-28T10:00:03.3000000Z ##[error]Process completed with exit code 1.",
@@ -111,6 +114,14 @@ def test_trim_drops_timestamps_markers_and_the_noise_far_from_the_error() -> Non
     assert "restoring package 0" not in out
     assert "post step 49" not in out
     assert len(out.splitlines()) < 60
+
+
+def test_trim_anchors_on_the_failing_step_not_on_the_word_error() -> None:
+    # A step's script can contain "error" without failing; the failing step is
+    # the one that ends in ##[error].
+    out = trim_log(RAW)
+    assert "on error, print" not in out
+    assert out.splitlines()[0] == "Run grep for forbidden test providers"
 
 
 def test_trim_is_bounded() -> None:
@@ -215,3 +226,10 @@ def test_wait_survives_a_github_error() -> None:
 
     v, _ = wait_for_checks(fetch, sleep=clock.sleep, clock=clock, settle=0)
     assert v.state == GREEN
+
+
+def test_trim_strips_terminal_colours() -> None:
+    raw = "2026-09-28T10:00:00.0000000Z \x1b[31;1m  Failed App.Tests.ItemTests.Search [12 ms]\x1b[0m"
+    out = trim_log(raw)
+    assert "\x1b" not in out
+    assert "Failed App.Tests.ItemTests.Search [12 ms]" in out

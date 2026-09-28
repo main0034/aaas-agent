@@ -92,6 +92,16 @@ if ! python3 -c 'import claude_agent_sdk, jsonschema' >/dev/null 2>&1; then
   err "python3 ($(command -v python3)) cannot import the harness dependencies; /opt/venv/bin must be first on PATH."
 fi
 
+# One run may not see another. With all of runs/ mounted, a run read an
+# earlier run's workspace and copied its code (FINDINGS.md #23). run.sh mounts
+# only this run's directory; assert that rather than trusting it.
+if [ -d /work/runs ]; then
+  others=$(find /work/runs -mindepth 1 -maxdepth 1 | wc -l)
+  if [ "$others" -gt 1 ]; then
+    err "/work/runs holds $others entries; only this run's directory may be mounted."
+  fi
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "" >&2
   echo "Refusing to start. The isolation this run depends on is not intact." >&2
