@@ -45,7 +45,9 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from . import checks as ck
 from . import workspace as ws
+from .workspace_pr import checkout_pr_branch, diff_stat
 from .policy import (
     APP_PROTECTED_GLOBS,
     DEPLOYMENTS_PROTECTED_GLOBS,
@@ -63,9 +65,11 @@ TASKS = {
 }
 
 
-def briefing(task: str, workspace: ws.Workspace, runbook: str) -> str:
+def briefing(
+    task: str, workspace: ws.Workspace, runbook: str, fix: bool = False, skip_local_checks: bool = False
+) -> str:
     if task == "create-app":
-        return app_briefing(workspace, runbook)
+        return app_briefing(workspace, runbook, fix, skip_local_checks)
     return f"""
 # Workspace
 
@@ -108,7 +112,45 @@ If you need something from the requester that you cannot infer - `owner` and
 """.strip()
 
 
-def app_briefing(workspace: ws.Workspace, runbook: str) -> str:
+APP_STOP = """
+# When to stop
+
+Stop when you have opened the pull request and can report its URL, or when you
+are blocked and can say precisely what is blocking you. Do not merge anything.
+
+If the request leaves something about the data model genuinely open, ask
+plainly and wait. Asking is not failing.
+"""
+
+FIX_STOP = """
+# When to stop
+
+This is a fix round on a pull request that already exists. Stop when you have
+pushed a fix to its branch, or when you are blocked and can say precisely what
+is blocking you. Do not open another pull request, and do not merge or close
+this one. Nobody will answer a question in this round, so do not ask one.
+"""
+
+
+# Phase 5's deterministic fallback for producing a red check: the initial
+# session pushes without running the runbook's local proof, so CI meets the code
+# first. Fix rounds never get this - they run section 4 as written.
+SKIP_LOCAL_CHECKS = """
+# For this run only
+
+Skip section 4 of the runbook ("Prove it before anyone looks at it"): do not run
+the local restore, format, build or test commands before you push. CI runs the
+same checks on the pull request. This is deliberate - the run is measuring how
+a failed check gets fixed - so do not compensate by checking some other way.
+"""
+
+
+def app_briefing(
+    workspace: ws.Workspace, runbook: str, fix: bool = False, skip_local_checks: bool = False
+) -> str:
+    stop = FIX_STOP if fix else APP_STOP
+    if skip_local_checks and not fix:
+        stop = SKIP_LOCAL_CHECKS.strip() + "\n\n" + stop.strip()
     return f"""
 # Workspace
 
@@ -139,13 +181,7 @@ Follow `{workspace.deployments}/{runbook}`, exactly. Read it before you start. I
 is the runbook, not a summary of one. The application repository is
 `{workspace.app.name if workspace.app else ''}`, already cloned at `{workspace.app}`.
 
-# When to stop
-
-Stop when you have opened the pull request and can report its URL, or when you
-are blocked and can say precisely what is blocking you. Do not merge anything.
-
-If the request leaves something about the data model genuinely open, ask
-plainly and wait. Asking is not failing.
+{stop.strip()}
 """.strip()
 
 
@@ -285,25 +321,28 @@ async def run(args: argparse.Namespace) -> int:
     if workspace.app:
         read_only_dirs.append(str(workspace.deployments))
 
-    options = ClaudeAgentOptions(
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": system_prompt + "\n\n" + briefing(args.task, workspace, runbook),
-        },
-        allowed_tools=ALLOWED_TOOLS,
-        disallowed_tools=DISALLOWED_TOOLS,
-        permission_mode="bypassPermissions",
-        hooks={
-            "PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(policy)])],
-        },
-        cwd=str(workdir),
-        add_dirs=read_only_dirs,
-        max_turns=args.max_turns,
-        model=args.model,
-        setting_sources=None,
-        env={"GH_TOKEN": os.environ.get("GH_TOKEN", "")},
-    )
+    def make_options(fix: bool = False) -> ClaudeAgentOptions:
+        return ClaudeAgentOptions(
+            system_prompt={
+                "type": "preset",
+                "preset": "claude_code",
+                "append": system_prompt + "\n\n" + briefing(args.task, workspace, runbook, fix, args.skip_local_checks),
+            },
+            allowed_tools=ALLOWED_TOOLS,
+            disallowed_tools=DISALLOWED_TOOLS,
+            permission_mode="bypassPermissions",
+            hooks={
+                "PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(policy)])],
+            },
+            cwd=str(workdir),
+            add_dirs=read_only_dirs,
+            max_turns=args.max_turns,
+            model=args.model,
+            setting_sources=None,
+            env={"GH_TOKEN": os.environ.get("GH_TOKEN", "")},
+        )
+
+    options = make_options()
 
     record = RunRecord(
         run_id=run_id,
@@ -319,6 +358,7 @@ async def run(args: argparse.Namespace) -> int:
             ),
             "runbook": runbook,
             "model": args.model or "(CLI default)",
+            **({"skip local checks": "yes (Phase 5 fallback)"} if args.skip_local_checks else {}),
             "auth": "subscription" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") else "api-key",
         },
     )
@@ -326,68 +366,36 @@ async def run(args: argparse.Namespace) -> int:
     print(f"Workspace ready at {workdir}\n")
     print("\033[1m" + "─" * 72 + "\033[0m")
 
-    message = args.request
     exit_code = 0
-
     status = StatusLine()
 
     # try/finally: an interrupted run should still leave a report behind. The
     # transcript is written as it goes, but the timings and refusal list are
     # only assembled at the end.
     try:
-        async with ClaudeSDKClient(options=options) as client:
-            while True:
-                turn = record.start_turn()
-                await client.query(message)
-                status.start()
+        before = _snapshot(record)
+        outcome = await run_session(options, args.request, record, status, interactive=not args.non_interactive)
+        record.rounds.append({"round": 0, "kind": "initial", **_delta(record, before)})
+        if outcome.is_error:
+            exit_code = 1
 
-                try:
-                    async for msg in client.receive_response():
-                        record.append_message(msg)
-
-                        if isinstance(msg, AssistantMessage):
-                            for block in msg.content:
-                                if isinstance(block, ToolUseBlock):
-                                    record.note_tool(block.name)
-                                if isinstance(block, TextBlock):
-                                    record.note_text(block.text)
-                                rendered = render_block(block)
-                                if rendered:
-                                    status.write(rendered)
-                        elif isinstance(msg, ResultMessage):
-                            # Recorded so a run can be resumed or forked later.
-                            # Note this is necessary but not sufficient: the CLI
-                            # keeps session transcripts under ~/.claude, which
-                            # `docker run --rm` discards, and keys them by working
-                            # directory, which is unique per run. See README.
-                            if msg.session_id:
-                                record.metadata.setdefault("session_id", msg.session_id)
-                            record.sdk_turns += msg.num_turns
-                            record.cost_usd += msg.total_cost_usd or 0.0
-                            if msg.is_error:
-                                record.errors.append(msg.result or "unknown error")
-                                exit_code = 1
-                            if msg.result:
-                                record.note_text(msg.result)
-                        elif isinstance(msg, SystemMessage) and msg.subtype == "error":
-                            record.errors.append(str(msg.data))
-                finally:
-                    await status.stop()
-
-                record.end_turn()
-                print(
-                    f"\033[2m  exchange {turn.index}: {turn.seconds:.0f}s, "
-                    f"${record.cost_usd:.4f} so far\033[0m"
-                )
-                print("\033[1m" + "─" * 72 + "\033[0m")
-
-                if args.non_interactive:
-                    break
-
-                followup = read_followup()
-                if followup is None:
-                    break
-                message = followup
+        if args.fix_rounds and outcome.stopped_by:
+            record.end_reason = f"the agent's session ended early ({outcome.stopped_by}); no fix-forward"
+        elif args.fix_rounds:
+            pr_url = next((u for u in record.pr_urls if f"/{args.app_repo}/pull/" in u), None)
+            if pr_url is None:
+                record.end_reason = "no pull request on the app repository, so nothing to fix forward"
+                exit_code = exit_code or 1
+            else:
+                exit_code = await fix_forward(
+                    args, ck.parse_pr_url(pr_url), workspace, runbook, make_options, record, status
+                ) or exit_code
+        elif outcome.stopped_by:
+            record.end_reason = f"the agent's session ended early: {outcome.stopped_by}"
+        elif record.pr_urls:
+            record.end_reason = "pull request opened"
+        else:
+            record.end_reason = "the agent stopped without opening a pull request"
     finally:
         record.finish(policy.denials)
 
@@ -405,8 +413,195 @@ async def run(args: argparse.Namespace) -> int:
     if policy.denials:
         print(f"  {len(policy.denials)} policy refusal(s) — see report.md")
     print(f"  Report: {run_dir / 'report.md'}")
+    # The last line says why, so a log tail is enough (FINDINGS.md #22).
+    print(f"\033[1mEnded because:\033[0m {record.end_reason or '(not recorded)'}")
 
     return exit_code
+
+
+class SessionOutcome:
+    def __init__(self) -> None:
+        self.is_error = False
+        # Set when the SDK stopped the session rather than the agent finishing:
+        # max_turns, a rate limit, an execution error. That run pushed nothing.
+        self.stopped_by: str | None = None
+        self.last_text = ""
+
+
+async def run_session(
+    options: ClaudeAgentOptions,
+    message: str,
+    record: RunRecord,
+    status: StatusLine,
+    interactive: bool,
+) -> SessionOutcome:
+    """One agent session: a first message, and follow-ups if interactive."""
+    outcome = SessionOutcome()
+    async with ClaudeSDKClient(options=options) as client:
+        while True:
+            turn = record.start_turn()
+            await client.query(message)
+            status.start()
+
+            try:
+                async for msg in client.receive_response():
+                    record.append_message(msg)
+
+                    if isinstance(msg, AssistantMessage):
+                        for block in msg.content:
+                            if isinstance(block, ToolUseBlock):
+                                record.note_tool(block.name)
+                            if isinstance(block, TextBlock):
+                                record.note_text(block.text)
+                                outcome.last_text = block.text
+                            rendered = render_block(block)
+                            if rendered:
+                                status.write(rendered)
+                    elif isinstance(msg, ResultMessage):
+                        # Recorded so a run can be resumed or forked later.
+                        # Note this is necessary but not sufficient: the CLI
+                        # keeps session transcripts under ~/.claude, which
+                        # `docker run --rm` discards, and keys them by working
+                        # directory, which is unique per run. See README.
+                        if msg.session_id:
+                            record.metadata.setdefault("session_id", msg.session_id)
+                        record.sdk_turns += msg.num_turns
+                        record.cost_usd += msg.total_cost_usd or 0.0
+                        subtype = getattr(msg, "subtype", "") or ""
+                        if subtype.startswith("error"):
+                            outcome.stopped_by = subtype
+                        if msg.is_error:
+                            record.errors.append(msg.result or subtype or "unknown error")
+                            outcome.is_error = True
+                            outcome.stopped_by = outcome.stopped_by or (msg.result or "error")[:200]
+                        if msg.result:
+                            record.note_text(msg.result)
+                    elif isinstance(msg, SystemMessage) and msg.subtype == "error":
+                        record.errors.append(str(msg.data))
+            finally:
+                await status.stop()
+
+            record.end_turn()
+            print(
+                f"\033[2m  exchange {turn.index}: {turn.seconds:.0f}s, "
+                f"${record.cost_usd:.4f} so far\033[0m"
+            )
+            print("\033[1m" + "─" * 72 + "\033[0m")
+
+            if not interactive:
+                break
+
+            followup = read_followup()
+            if followup is None:
+                break
+            message = followup
+    return outcome
+
+
+def _snapshot(record: RunRecord) -> tuple[float, float, int]:
+    return (time.time(), record.cost_usd, record.sdk_turns)
+
+
+def _delta(record: RunRecord, before: tuple[float, float, int]) -> dict:
+    t0, cost0, turns0 = before
+    return {
+        "agent_seconds": round(time.time() - t0, 1),
+        "cost_usd": round(record.cost_usd - cost0, 4),
+        "sdk_turns": record.sdk_turns - turns0,
+    }
+
+
+async def fix_forward(
+    args: argparse.Namespace,
+    pr: ck.PullRequest,
+    workspace: ws.Workspace,
+    runbook: str,
+    make_options,  # noqa: ANN001
+    record: RunRecord,
+    status: StatusLine,
+) -> int:
+    """Wait for the PR's checks; on red, hand the failure to a fresh session.
+
+    Returns an exit code and sets record.end_reason. Never merges: who merges on
+    green is OQ-5, and today the answer is a human.
+    """
+    previous_sha = None
+    for round_no in range(0, args.fix_rounds + 1):
+        head = ck.pr_head(pr)
+        sha, branch, base = head["headRefOid"], head["headRefName"], head["baseRefName"]
+        if round_no > 0 and sha == previous_sha:
+            record.end_reason = f"fix round {round_no} ended without pushing a new commit"
+            return 1
+        previous_sha = sha
+
+        print(f"\n\033[1mWaiting for checks on {pr.url} @ {sha[:7]}\033[0m")
+
+        def show(v: ck.Verdict, elapsed: float) -> None:
+            waiting = ", ".join(v.waiting_for) if v.waiting_for else ""
+            print(f"\033[2m  {int(elapsed):>4}s  {v.state}  {waiting}\033[0m")
+
+        v, waited = ck.wait_for_checks(
+            lambda: ck.check_runs(pr, sha), timeout=args.checks_timeout, on_poll=show
+        )
+        record.rounds[-1].update(
+            {
+                "sha": sha[:7],
+                "checks": v.state,
+                "checks_seconds": round(waited, 1),
+                "failed_checks": [c.name for c in v.failed],
+            }
+        )
+
+        if v.state == ck.GREEN:
+            fixes = round_no
+            record.end_reason = (
+                "checks green on first push" if fixes == 0
+                else f"checks green after {fixes} fix round{'s' if fixes > 1 else ''} - ready for a human to merge"
+            )
+            return 0
+        if v.state == ck.PENDING:
+            record.end_reason = f"checks did not finish within {args.checks_timeout}s ({', '.join(v.waiting_for)})"
+            return 1
+        if round_no == args.fix_rounds:
+            record.end_reason = (
+                f"checks still red after {args.fix_rounds} fix rounds "
+                f"({', '.join(c.name for c in v.failed)}) - the agent's last explanation is in the transcript"
+            )
+            return 1
+
+        failures = []
+        for check in v.failed:
+            try:
+                log = ck.trim_log(ck.job_log(pr, check))
+            except ck.ChecksError as exc:
+                log = f"(the harness could not fetch this log: {exc})"
+            failures.append((check.name, log))
+        (record.directory / f"round-{round_no + 1}-failure.log").write_text(
+            "\n\n".join(f"== {n}\n{log}" for n, log in failures), encoding="utf-8"
+        )
+
+        checkout_pr_branch(workspace.app, branch, sha)
+        brief = ck.fix_brief(
+            round_no=round_no + 1,
+            max_rounds=args.fix_rounds,
+            request=args.request,
+            pr_url=pr.url,
+            branch=branch,
+            diff_stat=diff_stat(workspace.app, base),
+            failures=failures,
+            runbook=runbook,
+        )
+        print(f"\n\033[1mFix round {round_no + 1}: {', '.join(n for n, _ in failures)} failed\033[0m")
+        print("\033[1m" + "─" * 72 + "\033[0m")
+
+        before = _snapshot(record)
+        # A fresh session: new client, new context. Only the brief carries over.
+        outcome = await run_session(make_options(fix=True), brief, record, status, interactive=False)
+        record.rounds.append({"round": round_no + 1, "kind": "fix", **_delta(record, before)})
+        if outcome.stopped_by:
+            record.end_reason = f"fix round {round_no + 1} was stopped ({outcome.stopped_by})"
+            return 1
+    return 1  # unreachable: the loop returns on every path
 
 
 def main() -> int:
@@ -429,12 +624,41 @@ def main() -> int:
     parser.add_argument("--model", default=os.environ.get("AAAS_MODEL") or None)
     parser.add_argument("--max-turns", type=int, default=60)
     parser.add_argument(
+        "--fix-rounds",
+        type=int,
+        default=0,
+        help="create-app only: after the PR is opened, wait for its checks and, if one "
+        "fails, give a fresh session the failure log to fix it on the same branch - up "
+        "to this many times. The runbook allows two. Implies --non-interactive.",
+    )
+    parser.add_argument(
+        "--skip-local-checks",
+        action="store_true",
+        help="create-app only: tell the initial session to push without the runbook's "
+        "local build/test/format, so CI meets the code first. For producing a red check "
+        "on purpose (Phase 5). Fix rounds are never told this.",
+    )
+    parser.add_argument(
+        "--checks-timeout",
+        type=int,
+        default=25 * 60,
+        help="Seconds to wait for a commit's checks before giving up.",
+    )
+    parser.add_argument(
         "--non-interactive",
         action="store_true",
         help="Do not prompt for follow-up input. The agent gets exactly one turn to "
         "finish, so anything it would have asked about must be in the request.",
     )
     args = parser.parse_args()
+    if args.skip_local_checks and args.task != "create-app":
+        parser.error("--skip-local-checks only applies to --task create-app")
+    if args.fix_rounds:
+        if args.task != "create-app":
+            parser.error("--fix-rounds is only implemented for --task create-app")
+        if not 0 < args.fix_rounds <= 2:
+            parser.error("--fix-rounds must be 1 or 2 - create-app.md section 6 allows two")
+        args.non_interactive = True
 
     if args.request.startswith("@"):
         brief = Path(args.request[1:])

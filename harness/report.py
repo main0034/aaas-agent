@@ -59,6 +59,13 @@ class RunRecord:
     errors: list[str] = field(default_factory=list)
     denials: list[Any] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Fix-forward (Phase 5): one entry per agent session - the initial one and
+    # each fix round - with what CI said about the commit it pushed.
+    rounds: list[dict[str, Any]] = field(default_factory=list)
+    # Why the run stopped, in one line. A capped run and a finished run both
+    # used to end in "exit 1, no PR URL" with the cause only in the transcript
+    # (FINDINGS.md #22).
+    end_reason: str = ""
 
     # -- writing -----------------------------------------------------------
 
@@ -126,6 +133,8 @@ class RunRecord:
             "errors": self.errors,
             "metadata": self.metadata,
             "turn_seconds": [round(t.seconds, 1) for t in self.turns],
+            "rounds": self.rounds,
+            "end_reason": self.end_reason,
         }
 
     def render(self) -> str:
@@ -136,7 +145,8 @@ class RunRecord:
             f"**Task:** `{self.task}`  ",
             f"**Wall clock:** {minutes}m {seconds}s  ",
             f"**Turns:** {len(self.turns)} (SDK counted {self.sdk_turns})  ",
-            f"**Cost:** ${self.cost_usd:.4f}",
+            f"**Cost:** ${self.cost_usd:.4f}  ",
+            f"**Ended because:** {self.end_reason or '(not recorded)'}",
             "",
             "## Request",
             "",
@@ -157,6 +167,22 @@ class RunRecord:
         else:
             lines.append("- **No pull request was opened.** The run did not reach its goal.")
         lines.append("")
+
+        if self.rounds:
+            lines += [
+                "## Fix-forward rounds",
+                "",
+                "| Round | Agent | Turns | Cost | CI verdict | CI wait | Failed checks |",
+                "|---|---|---|---|---|---|---|",
+            ]
+            for r in self.rounds:
+                lines.append(
+                    f"| {r.get('round')} ({r.get('kind')}) | {r.get('agent_seconds', 0):.0f}s "
+                    f"| {r.get('sdk_turns', 0)} | ${r.get('cost_usd', 0):.4f} "
+                    f"| {r.get('checks', '-')} | {r.get('checks_seconds', 0):.0f}s "
+                    f"| {', '.join(r.get('failed_checks', [])) or '-'} |"
+                )
+            lines.append("")
 
         if self.tool_counts:
             lines += ["## Tool use", "", "| Tool | Calls |", "|---|---|"]
