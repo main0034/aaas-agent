@@ -63,6 +63,29 @@ can ask for `owner` and `costCenter` the way the runbook tells it to. A blank
 line ends the session. `--non-interactive` gives it exactly one turn, which is
 the mode to use once you are timing runs rather than debugging them.
 
+### Fix-forward (`--fix-rounds`)
+
+```bash
+./run.sh --task create-app --app-repo aaas-app-demo --request @briefs/item-search.md --fix-rounds 2
+```
+
+After the agent opens its PR, the harness - not the agent - waits for the
+checks on the PR's head commit (`harness/checks.py`). Green ends the run. Red
+fetches the failed jobs' logs, trims them to the run-up and the error lines, and
+starts a **fresh** session on the PR branch with the original request, the diff
+stat and the log - nothing from the first session's context (FINDINGS.md #14:
+the cost is context). The fix round pushes to the same branch and the harness
+waits again. At most two rounds, as `create-app.md` section 6 says; a round that
+pushes nothing ends the loop. The harness never merges.
+
+Checks are read per commit, not per PR: right after a push, the PR still shows
+the previous commit's red result. `report.md` has a per-round table (agent time,
+turns, cost, CI verdict and wait) and the run's last line says why it ended.
+
+`--skip-local-checks` tells the initial session to skip the runbook's local
+build/test/format, so CI meets the code first. It exists to produce a red check
+on purpose; fix rounds are never told it.
+
 Output lands in `runs/<timestamp>/`: `report.md`, `report.json`,
 `transcript.jsonl`, and the `workspace/` the agent worked in — left in place on
 purpose, because the fastest way to understand a confusing run is to look at the
