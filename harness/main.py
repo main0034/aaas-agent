@@ -50,6 +50,7 @@ from . import checks as ck
 from . import workspace as ws
 from .workspace_pr import checkout_pr_branch, diff_stat
 from .policy import (
+    ACCEPTANCE_PROTECTED_GLOBS,
     APP_PROTECTED_GLOBS,
     DEPLOYMENTS_PROTECTED_GLOBS,
     ToolPolicy,
