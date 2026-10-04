@@ -237,6 +237,16 @@ APP_PROTECTED_GLOBS: tuple[str, ...] = (
     "dotnet-tools.json",
 )
 
+# write-acceptance: writes are confined to the acceptance directory, and the base
+# class in it is the harness's, not the agent's.
+ACCEPTANCE_PROTECTED_GLOBS: tuple[str, ...] = ("AcceptanceBase.cs",)
+
+# Offline tasks: the git subcommands that reach a remote. Without them, and without
+# gh, a session cannot read a branch it was not given (workspace.isolate).
+GIT_NETWORK_SUBCOMMANDS: set[str] = {
+    "fetch", "pull", "push", "clone", "remote", "ls-remote", "submodule",
+}
+
 DEPLOYMENTS_PROTECTED_GLOBS: tuple[str, ...] = (
     "schemas/",
     "scripts/",
@@ -273,6 +283,8 @@ class ToolPolicy:
 
     writable_roots: list[Path]
     protected_globs: tuple[str, ...] = DEPLOYMENTS_PROTECTED_GLOBS
+    # True for write-acceptance: no gh, no git network. See GIT_NETWORK_SUBCOMMANDS.
+    offline: bool = False
     denials: list[Denial] = field(default_factory=list)
 
     # -- entry point -------------------------------------------------------
@@ -360,6 +372,12 @@ class ToolPolicy:
         if program == "python3":
             return self._check_python(tokens)
         if program == "gh":
+            if self.offline:
+                return Decision(
+                    False,
+                    "`gh` is not available in this task. You write tests from the request "
+                    "alone; there is no pull request to look at and nothing to open.",
+                )
             return self._check_gh(tokens)
         if program == "git":
             return self._check_git(tokens)
@@ -467,6 +485,14 @@ class ToolPolicy:
     def _check_git(self, tokens: list[str]) -> Decision:
         args = [t for t in tokens[1:] if not t.startswith("-")]
         sub = args[0] if args else ""
+        hit = next((a for a in args if a in GIT_NETWORK_SUBCOMMANDS), None)
+        if self.offline and hit:
+            return Decision(
+                False,
+                f"`git {hit}` is not available in this task. The checkout is the default "
+                f"branch as it is before the change, on purpose: the tests must come from "
+                f"the request, not from anyone's implementation.",
+            )
         if sub == "push":
             if any(t in {"--force", "-f", "--force-with-lease"} for t in tokens):
                 return Decision(
