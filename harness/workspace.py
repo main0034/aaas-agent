@@ -94,6 +94,7 @@ def prepare(
     deployments_repo: str = "aaas-deployments",
     modules_repo: str = "aaas-infra-modules",
     app_repo: str | None = None,
+    isolate_app: bool = False,
 ) -> Workspace:
     if not os.environ.get("GH_TOKEN"):
         raise WorkspaceError(
@@ -118,10 +119,32 @@ def prepare(
         # The repository must already exist - create-app.md section 0. Cloning
         # fails legibly here if it does not, before the agent spends a turn.
         app = _clone(owner, app_repo, root / app_repo)
+        if isolate_app:
+            isolate(app)
         _run(["git", "config", "user.name", GIT_USER_NAME], cwd=app)
         _run(["git", "config", "user.email", GIT_USER_EMAIL], cwd=app)
 
     return Workspace(root=root, deployments=deployments, reference=reference_root, app=app)
+
+
+def isolate(repo: Path) -> None:
+    """Cut a checkout off from everything but the default branch's current commit.
+
+    The write-acceptance task writes tests for a change someone else is building, and
+    the measurement is worthless if it can read that change. The app repositories are
+    public and a normal clone carries every branch (`origin/feat/...`), so: drop every
+    other ref, then the remote itself, so nothing can be fetched by name either. The
+    session also gets no token and no `gh`, and the policy refuses git's network
+    subcommands; this function is the part that does not depend on the policy.
+    """
+    branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
+    _run(["git", "remote", "remove", "origin"], cwd=repo)
+    refs = _run(["git", "for-each-ref", "--format=%(refname)"], cwd=repo).splitlines()
+    for ref in refs:
+        if ref != f"refs/heads/{branch}":
+            _run(["git", "update-ref", "-d", ref], cwd=repo)
+    _run(["git", "reflog", "expire", "--expire=now", "--all"], cwd=repo)
+    _run(["git", "gc", "--prune=now", "--quiet"], cwd=repo)
 
 
 def head_sha(repo: Path) -> str:

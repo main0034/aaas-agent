@@ -195,3 +195,60 @@ def test_dotnet(app_policy: ToolPolicy, command: str, allowed: bool) -> None:
 def test_app_writes(app_policy: ToolPolicy, path: Path, allowed: bool) -> None:
     decision = app_policy.check("Write", {"file_path": str(path)})
     assert decision.allow is allowed, f"{path}: {decision.reason}"
+
+
+# -- write-acceptance: offline, and writes only into the acceptance directory --------
+
+ACC_APP = Path("/work/runs/x/workspace/aaas-app-demo")
+ACC_DIR = ACC_APP / "tests/App.Tests/Acceptance"
+
+
+@pytest.fixture()
+def acceptance() -> ToolPolicy:
+    from harness.policy import ACCEPTANCE_PROTECTED_GLOBS
+
+    return ToolPolicy(writable_roots=[ACC_DIR, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True)
+
+
+@pytest.mark.parametrize(
+    ("command", "allowed"),
+    [
+        ("dotnet build", True),
+        ("dotnet test", True),
+        ("dotnet restore", True),
+        ("git log --oneline -5", True),
+        ("git show HEAD:src/App/Program.cs", True),
+        ("git fetch origin pull/16/head", False),
+        ("git -C /work/runs/x/workspace/aaas-app-demo fetch", False),
+        ("git pull", False),
+        ("git remote add up https://github.com/main0034/aaas-app-demo", False),
+        ("git ls-remote https://github.com/main0034/aaas-app-demo", False),
+        ("git clone https://github.com/main0034/aaas-app-demo /tmp/x", False),
+        ("gh pr view 16", False),
+        ("gh pr diff 16", False),
+        ("gh repo clone main0034/aaas-app-demo", False),
+        ("curl https://github.com", False),
+    ],
+)
+def test_acceptance_bash(acceptance: ToolPolicy, command: str, allowed: bool) -> None:
+    assert acceptance.check("Bash", {"command": command}).allow is allowed
+
+
+@pytest.mark.parametrize(
+    ("path", "allowed"),
+    [
+        (ACC_DIR / "ProjectsAcceptance.cs", True),
+        (ACC_DIR / "NOTES.md", True),
+        (ACC_DIR / "AcceptanceBase.cs", False),
+        (ACC_APP / "src/App/Program.cs", False),
+        (ACC_APP / "tests/App.Tests/ItemEndpointTests.cs", False),
+        (Path("/tmp/scratch.md"), True),
+    ],
+)
+def test_acceptance_writes(acceptance: ToolPolicy, path: Path, allowed: bool) -> None:
+    assert acceptance.check("Write", {"file_path": str(path)}).allow is allowed
+
+
+def test_offline_is_off_by_default(policy: ToolPolicy) -> None:
+    assert policy.check("Bash", {"command": "gh pr view 16"}).allow
+    assert policy.check("Bash", {"command": "git fetch origin"}).allow

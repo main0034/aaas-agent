@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -62,7 +63,14 @@ DISALLOWED_TOOLS = ["WebFetch", "WebSearch", "Task", "NotebookEdit"]
 TASKS = {
     "create-deployment": "agent/create-deployment.md",
     "create-app": "agent/create-app.md",
+    "write-acceptance": "agent/write-acceptance.md",
 }
+
+# Tasks that work in an application repository.
+APP_TASKS = {"create-app", "write-acceptance"}
+
+ACCEPTANCE_DIR = Path("tests/App.Tests/Acceptance")
+ACCEPTANCE_BASE = Path(__file__).parent / "acceptance" / "AcceptanceBase.cs"
 
 
 def briefing(
@@ -70,6 +78,8 @@ def briefing(
 ) -> str:
     if task == "create-app":
         return app_briefing(workspace, runbook, fix, skip_local_checks)
+    if task == "write-acceptance":
+        return acceptance_briefing(workspace)
     return f"""
 # Workspace
 
@@ -185,6 +195,34 @@ is the runbook, not a summary of one. The application repository is
 """.strip()
 
 
+def acceptance_briefing(workspace: ws.Workspace) -> str:
+    acc = workspace.app / ACCEPTANCE_DIR
+    return f"""
+# Workspace
+
+You are running in a container with no credentials of any kind and no network
+access to GitHub. That is deliberate: see "Why you cannot see the change" in your
+instructions.
+
+| Path | You may |
+|---|---|
+| `{workspace.app}` | read only - the application as it is *before* the change. Your working directory |
+| `{acc}` | write your test file and `NOTES.md` here, and nowhere else. `AcceptanceBase.cs` is already there and is not yours to edit |
+| `/tmp` | write scratch files |
+
+Your shell has `git` (local commands only), `jq`, the usual read-only tools and
+`dotnet` (restore, build, test). There is no database, so endpoint tests skip
+here; that is expected. Use the Write and Edit tools to create files.
+
+# Your task
+
+The request is the next message. Write acceptance tests for it, following your
+instructions exactly. Stop when `dotnet build` succeeds with your file in place
+and `NOTES.md` is written, and report the number of tests and the ambiguities you
+left untested.
+""".strip()
+
+
 def render_block(block) -> str:  # noqa: ANN001
     if isinstance(block, TextBlock):
         return block.text
@@ -281,15 +319,17 @@ async def run(args: argparse.Namespace) -> int:
     print(f"\033[1mRun {run_id}\033[0m  ({run_dir})\n")
 
     print("Preparing workspace…")
-    if args.task == "create-app" and not args.app_repo:
-        print("\033[31m--task create-app needs --app-repo <name>.\033[0m", file=sys.stderr)
+    if args.task in APP_TASKS and not args.app_repo:
+        print(f"\033[31m--task {args.task} needs --app-repo <name>.\033[0m", file=sys.stderr)
         return 2
+    acceptance = args.task == "write-acceptance"
 
     try:
         workspace = ws.prepare(
             run_dir / "workspace",
             owner=args.owner,
-            app_repo=args.app_repo if args.task == "create-app" else None,
+            app_repo=args.app_repo if args.task in APP_TASKS else None,
+            isolate_app=acceptance,
         )
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
@@ -306,16 +346,31 @@ async def run(args: argparse.Namespace) -> int:
         )
         return 2
 
-    prompt_path = workspace.deployments / "agent" / "PROMPT.md"
-    system_prompt = prompt_path.read_text(encoding="utf-8")
+    if acceptance:
+        # A different role, so a different prompt: PROMPT.md describes the agent that
+        # builds and opens PRs. This one only writes tests, from the runbook alone.
+        system_prompt = runbook_path.read_text(encoding="utf-8")
+        acc_dir = workspace.app / ACCEPTANCE_DIR
+        acc_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ACCEPTANCE_BASE, acc_dir / ACCEPTANCE_BASE.name)
+    else:
+        prompt_path = workspace.deployments / "agent" / "PROMPT.md"
+        system_prompt = prompt_path.read_text(encoding="utf-8")
 
     # /tmp is writable because the runbooks tell the agent to compose a PR body
     # in a file - a heredoc inside an argument is a reliable way to produce a
     # confusing shell error, which is why release.yml does the same thing.
-    policy = ToolPolicy(
-        writable_roots=[*workspace.writable_roots, Path("/tmp")],
-        protected_globs=APP_PROTECTED_GLOBS if workspace.app else DEPLOYMENTS_PROTECTED_GLOBS,
-    )
+    if acceptance:
+        policy = ToolPolicy(
+            writable_roots=[workspace.app / ACCEPTANCE_DIR, Path("/tmp")],
+            protected_globs=ACCEPTANCE_PROTECTED_GLOBS,
+            offline=True,
+        )
+    else:
+        policy = ToolPolicy(
+            writable_roots=[*workspace.writable_roots, Path("/tmp")],
+            protected_globs=APP_PROTECTED_GLOBS if workspace.app else DEPLOYMENTS_PROTECTED_GLOBS,
+        )
     workdir = workspace.app or workspace.deployments
     read_only_dirs = [str(workspace.reference)]
     if workspace.app:
@@ -339,7 +394,8 @@ async def run(args: argparse.Namespace) -> int:
             max_turns=args.max_turns,
             model=args.model,
             setting_sources=None,
-            env={"GH_TOKEN": os.environ.get("GH_TOKEN", "")},
+            # No token for write-acceptance: it has nothing to push and nothing to read.
+            env={"GH_TOKEN": "" if acceptance else os.environ.get("GH_TOKEN", "")},
         )
 
     options = make_options()
@@ -392,6 +448,14 @@ async def run(args: argparse.Namespace) -> int:
                 ) or exit_code
         elif outcome.stopped_by:
             record.end_reason = f"the agent's session ended early: {outcome.stopped_by}"
+        elif acceptance:
+            written = collect_acceptance(workspace.app / ACCEPTANCE_DIR, run_dir / "acceptance")
+            record.metadata["acceptance files"] = ", ".join(written) or "(none)"
+            if any(name.endswith(".cs") for name in written):
+                record.end_reason = f"acceptance tests written: {', '.join(written)}"
+            else:
+                record.end_reason = "the agent stopped without writing a test file"
+                exit_code = exit_code or 1
         elif record.pr_urls:
             record.end_reason = "pull request opened"
         else:
@@ -404,7 +468,9 @@ async def run(args: argparse.Namespace) -> int:
         f"\n\033[1mDone in {minutes}m {seconds}s\033[0m - ${record.cost_usd:.4f}, "
         f"{len(record.turns)} exchange(s), {record.sdk_turns} model turns"
     )
-    if record.pr_urls:
+    if acceptance:
+        print(f"  Tests: {run_dir / 'acceptance'}")
+    elif record.pr_urls:
         for url in record.pr_urls:
             print(f"  PR: {url}")
     else:
@@ -417,6 +483,17 @@ async def run(args: argparse.Namespace) -> int:
     print(f"\033[1mEnded because:\033[0m {record.end_reason or '(not recorded)'}")
 
     return exit_code
+
+
+def collect_acceptance(source: Path, dest: Path) -> list[str]:
+    """Copy what the session wrote (not the harness's base class) into the run record."""
+    dest.mkdir(parents=True, exist_ok=True)
+    written = []
+    for f in sorted(source.glob("*")):
+        if f.is_file() and f.name != ACCEPTANCE_BASE.name:
+            shutil.copy(f, dest / f.name)
+            written.append(f.name)
+    return written
 
 
 class SessionOutcome:
