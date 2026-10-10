@@ -196,6 +196,7 @@ def fix_brief(
     diff_stat: str,
     failures: list[tuple[str, str]],
     runbook: str,
+    note: str = "",
 ) -> str:
     """The whole of what a fix round's fresh session is told.
 
@@ -229,7 +230,7 @@ directory at the commit CI ran against.
 
 {logs}
 
-## What to do
+{note.strip() + chr(10) + chr(10) if note.strip() else ""}## What to do
 
 Follow section 6 of `{runbook}`, "If CI fails". Work from the log above, not from
 a guess about it. Fix the cause on this branch, run the runbook's local checks,

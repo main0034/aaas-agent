@@ -1,5 +1,7 @@
-// Base class for acceptance tests (the write-acceptance task). The harness copies
-// it in; tests derived from it are never committed to an app repository.
+// Base class for acceptance tests (the write-acceptance task). App repositories
+// carry their own copy in tests/App.Tests/Acceptance/; the harness copies this one
+// in only for a repository that does not have it yet. Tests derived from it live
+// with the change they accept, in changes/<id>/ (harness/change.py).
 // Black-box: rows are created and read only through HTTP, so the tests do not depend
 // on how the agent modelled anything - only on the interface line in the brief.
 
