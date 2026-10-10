@@ -252,3 +252,25 @@ def test_acceptance_writes(acceptance: ToolPolicy, path: Path, allowed: bool) ->
 def test_offline_is_off_by_default(policy: ToolPolicy) -> None:
     assert policy.check("Bash", {"command": "gh pr view 16"}).allow
     assert policy.check("Bash", {"command": "git fetch origin"}).allow
+
+
+# -- conventions (AGENT.md): CSharpier and the test layout check ---------------
+
+
+@pytest.mark.parametrize(
+    "command, allowed",
+    [
+        ("dotnet csharpier format .", True),
+        ("dotnet csharpier check .", True),
+        ("dotnet csharpier server", False),
+        ("python3 scripts/check-test-layout.py --files tests/App.Tests/A.cs", True),
+        ("python3 scripts/validate_deployment.py deployments/dev/x", True),
+        ("python3 scripts/evil.py", False),
+        ("python3 -c 'print(1)'", False),
+    ],
+)
+def test_convention_tools(command: str, allowed: bool) -> None:
+    from harness.policy import APP_PROTECTED_GLOBS, ToolPolicy
+
+    policy = ToolPolicy(writable_roots=[Path("/w")], protected_globs=APP_PROTECTED_GLOBS)
+    assert policy.check("Bash", {"command": command}).allow is allowed

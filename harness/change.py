@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from datetime import date
 from pathlib import Path
 
@@ -147,3 +148,55 @@ fix the code. Do not edit them (you cannot), and do not make them pass by recogn
 their inputs. If you are certain a test contradicts the request, name the test, quote
 the sentence of the request it contradicts, and stop without pushing.
 """.strip()
+
+
+def conform(app: Path, files: list[Path]) -> list[str]:
+    """Bring a spec-tester's test files to the app's conventions, or say why they cannot be.
+
+    CI checks CSharpier formatting and the Arrange/Act/Assert layout (AGENT.md,
+    "Conventions") on the change record's files, and the builder cannot edit them -
+    so a non-conforming file would be a red check nobody can fix. Formatting is
+    mechanical, so the harness applies it; layout is the spec-tester's, so a
+    violation is reported. Repositories without the conventions are left alone.
+    """
+    if not files:
+        return []
+    paths = [str(f) for f in files]
+    manifest = app / "dotnet-tools.json"
+    if manifest.is_file() and '"csharpier"' in manifest.read_text(encoding="utf-8"):
+        _run(["dotnet", "tool", "restore"], cwd=app)
+        _run(["dotnet", "csharpier", "format", *paths], cwd=app)
+    checker = app / "scripts" / "check-test-layout.py"
+    if not checker.is_file():
+        return []
+    result = subprocess.run(
+        ["python3", str(checker), "--files", *paths], cwd=app, capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        return []
+    return [line.split("::", 2)[-1] for line in result.stdout.splitlines() if line.startswith("::error")]
+
+
+# What a change may touch and still be merged by the harness (step 2c, OQ-5).
+# A migration stays with a human (OQ-7), and so does a dependency: nothing reviews
+# a new package yet.
+MERGEABLE_PREFIXES = ("src/", "tests/")
+GATED = (
+    ("src/App/Migrations/", "adds or changes a migration"),
+    ("packages.lock.json", "changes a dependency"),
+    ("Directory.Packages.props", "changes a dependency"),
+)
+
+
+def merge_blockers(repo: Path, cid: str, base: str, head_sha: str) -> list[str]:
+    """Reasons the harness may not merge this change. Empty means it may."""
+    _run(["git", "fetch", "--quiet", "origin", base, head_sha], cwd=repo)
+    files = _run(["git", "diff", "--name-only", f"origin/{base}...{head_sha}"], cwd=repo).splitlines()
+    blockers: list[str] = []
+    for path in files:
+        gated = next((why for pat, why in GATED if pat in path), None)
+        if gated:
+            blockers.append(f"{gated} ({path})")
+        elif not (path.startswith(MERGEABLE_PREFIXES) or path.startswith(f"{CHANGES_DIR}/{cid}/")):
+            blockers.append(f"touches {path}")
+    return sorted(set(blockers))

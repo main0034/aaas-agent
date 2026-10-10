@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -116,7 +117,18 @@ def test_the_builder_may_not_write_changes(tmp_path: Path) -> None:
 # -- run_change, end to end with fakes ----------------------------------------
 
 
-def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "spec_testers, auto_merge, builder_file, merged",
+    [
+        (1, False, "code.cs", False),
+        (2, True, "src/App/Thing.cs", True),  # route-only: the harness merges
+        (2, True, "src/App/Migrations/20261010_X.cs", False),  # a migration stays with a human
+    ],
+)
+def test_builder_cannot_find_the_tests(
+    origin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    spec_testers: int, auto_merge: bool, builder_file: str, merged: bool,
+) -> None:
     runs = tmp_path / "runs"
     deployments = tmp_path / "deployments"
     (deployments / "agent").mkdir(parents=True)
@@ -146,7 +158,11 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
 
     async def fake_session(options, message, record, status, interactive):  # noqa: ANN001
         cwd = Path(options.cwd)
-        if options.env.get("GH_TOKEN") == "":  # the spec-tester
+        if options.env.get("GH_TOKEN") == "":  # a spec-tester
+            # It cannot find an earlier spec-tester's tests either.
+            hits = subprocess.run(["grep", "-rl", MARKER, str(tmp_path), str(spec_tmp)], capture_output=True, text=True).stdout
+            seen.setdefault("spec_hits", []).extend(hits.split())
+            seen.setdefault("namespaces", []).append(re.search(r"namespace is `([^`]+)`", options.system_prompt["append"]).group(1))
             seen["spec_config"] = options.env["CLAUDE_CONFIG_DIR"]
             policy = options.hooks["PreToolUse"][0].hooks[0]
             seen["src_write"] = await policy({"tool_name": "Write", "tool_input": {"file_path": str(cwd / "src/App/Program.cs")}}, None, None)
@@ -162,7 +178,8 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
         seen["hits"] = hits.split()
         seen["spec_config_exists"] = Path(seen["spec_config"]).exists()
         seen["builder_note"] = "change/" in options.system_prompt["append"]
-        (cwd / "code.cs").write_text("code\n")
+        (cwd / builder_file).parent.mkdir(parents=True, exist_ok=True)
+        (cwd / builder_file).write_text("code\n")
         git("add", ".", cwd=cwd)
         git("commit", "--quiet", "-m", "feat", cwd=cwd)
         git("push", "--quiet", "origin", "HEAD", cwd=cwd)
@@ -191,6 +208,8 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
         return [ck.CheckRun(1, "test", "completed", "success"), ck.CheckRun(2, "build", "completed", "success")]
 
     monkeypatch.setattr(ck, "check_runs", check_runs)
+    merges: list[str] = []
+    monkeypatch.setattr(ck, "merge", lambda p, sha: merges.append(sha))
     monkeypatch.setattr(ck.time, "sleep", lambda s: None)
     real_wait = ck.wait_for_checks
     monkeypatch.setattr(ck, "wait_for_checks", lambda fetch, **kw: real_wait(
@@ -200,7 +219,7 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
     args = argparse.Namespace(
         task="create-change", request="Add a thing.", app_repo="app", owner="o", runs_dir=str(runs),
         run_id="r1", change="thing", model=None, max_turns=5, fix_rounds=1, checks_timeout=60,
-        skip_local_checks=False, non_interactive=True,
+        skip_local_checks=False, non_interactive=True, spec_testers=spec_testers, auto_merge=auto_merge,
     )
     code = asyncio.run(m.run_change(args))
 
@@ -214,8 +233,32 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
     assert set(checked) == {tests_commit}, "checks were read on a commit without the tests"
     report = (runs / "r1" / "report.md").read_text()
     assert "acceptance tests unchanged" in report
-    assert (runs / "r1" / "spec" / "transcript.jsonl").read_text().count(MARKER) == 1
+    assert seen.get("spec_hits", []) == [], "a spec-tester could read another's tests"
+    assert len(set(seen["namespaces"])) == spec_testers
     on_branch = git("ls-tree", "-r", "--name-only", f"change/{seen['cid']}", cwd=origin)
-    assert f"changes/{seen['cid']}/ThingAcceptance.cs" in on_branch
     assert f"changes/{seen['cid']}/brief.md" in on_branch
+    if spec_testers == 1:
+        assert (runs / "r1" / "spec" / "transcript.jsonl").read_text().count(MARKER) == 1
+        assert f"changes/{seen['cid']}/ThingAcceptance.cs" in on_branch
+    else:
+        for letter in "AB":
+            assert (runs / "r1" / f"spec-{letter}" / "transcript.jsonl").read_text().count(MARKER) == 1
+            assert f"changes/{seen['cid']}/{letter}-ThingAcceptance.cs" in on_branch
+            assert f"changes/{seen['cid']}/{letter}-NOTES.md" in on_branch
     assert not os.path.exists(runs / "r1" / "workspace" / "app" / m.ACCEPTANCE_DIR / "ThingAcceptance.cs")
+    assert bool(merges) is merged
+    if auto_merge and not merged:
+        assert "not auto-merged: adds or changes a migration" in report
+
+
+def test_conform_reports_a_test_without_arrange_act_assert(tmp_path: Path) -> None:
+    checker = Path(__file__).parent / "fixtures" / "check-test-layout.py"
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "check-test-layout.py").write_text(checker.read_text())
+    good, bad = tmp_path / "Good.cs", tmp_path / "Bad.cs"
+    good.write_text("class T {\n    [Fact]\n    public async Task A()\n    {\n        // Act\n        var r = 1;\n        // Assert\n        Assert.Equal(1, r);\n    }\n}\n")
+    bad.write_text("class T {\n    [Fact]\n    public async Task B() => await Do();\n}\n")
+    assert chg.conform(tmp_path, [good]) == []
+    problems = chg.conform(tmp_path, [good, bad])
+    assert len(problems) == 1 and "expression body" in problems[0]
+    assert chg.conform(tmp_path / "nowhere", []) == []

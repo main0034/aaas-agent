@@ -285,6 +285,12 @@ def wait_for_head(
         sleep(poll)
 
 
+def merge(pr: PullRequest, sha: str, run: Runner = gh) -> None:
+    """Squash-merge the PR, only if its head is still `sha` (GitHub refuses otherwise)."""
+    run(["api", "-X", "PUT", f"repos/{pr.slug}/pulls/{pr.number}/merge",
+         "-f", "merge_method=squash", "-f", f"sha={sha}"])
+
+
 def check_runs(pr: PullRequest, sha: str, run: Runner = gh) -> list[CheckRun]:
     out = run(["api", f"repos/{pr.slug}/commits/{sha}/check-runs?per_page=100"])
     data = json.loads(out)
