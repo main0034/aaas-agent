@@ -207,8 +207,11 @@ ALLOWED_DOTNET_EF_MIGRATIONS: set[str] = {
     "has-pending-model-changes",
 }
 
-# python3 exists solely to run the schema validator.
-VALIDATOR_RE = re.compile(r"(^|/)scripts/validate_deployment\.py$")
+# python3 exists solely to run the repositories' own check scripts: the schema
+# validator (deployments) and the test layout check (apps, AGENT.md "Conventions").
+VALIDATOR_RE = re.compile(r"(^|/)scripts/(validate_deployment|check-test-layout)\.py$")
+# `dotnet csharpier`: the formatter AGENT.md names, pinned in dotnet-tools.json.
+ALLOWED_DOTNET_CSHARPIER: set[str] = {"format", "check"}
 
 SUBSTITUTION_RE = re.compile(r"\$\(|`|<\(|>\(")
 REDIRECT_RE = re.compile(r"(?<![0-9<>])>{1,2}(?!&)")
@@ -394,15 +397,16 @@ class ToolPolicy:
         if not args:
             return Decision(
                 False,
-                "python3 is available only to run `scripts/validate_deployment.py`. "
+                "python3 is available only to run the repository's check scripts "
+                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`). "
                 "An interactive interpreter is not.",
             )
         if not VALIDATOR_RE.search(args[0]):
             return Decision(
                 False,
-                "python3 is available only to run `scripts/validate_deployment.py` - "
-                "the schema gate you are required to pass before pushing. Use jq for "
-                "JSON and the Read tool for files.",
+                "python3 is available only to run the repository's check scripts "
+                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`). "
+                "Use jq for JSON and the Read tool for files.",
             )
         if any(t in {"-c", "-m"} for t in tokens):
             return Decision(False, "python3 -c / -m is not available.")
@@ -450,6 +454,11 @@ class ToolPolicy:
                 f"`dotnet tool {action}` is not available. The tools this repository "
                 f"uses are pinned in dotnet-tools.json; run `dotnet tool restore`.",
             )
+        if sub == "csharpier":
+            action = tokens[2] if len(tokens) > 2 else ""
+            if action in ALLOWED_DOTNET_CSHARPIER:
+                return Decision(True)
+            return Decision(False, "`dotnet csharpier` is available as `format <paths>` and `check <paths>`.")
         if sub == "ef":
             area = tokens[2] if len(tokens) > 2 else ""
             action = tokens[3] if len(tokens) > 3 else ""
@@ -482,7 +491,7 @@ class ToolPolicy:
         return Decision(
             False,
             f"`dotnet {sub}` is outside the runbook. The runbook uses restore, build, "
-            f"test, format, `tool restore` and `ef migrations`.",
+            f"test, format, `csharpier`, `tool restore` and `ef migrations`.",
         )
 
     def _check_git(self, tokens: list[str]) -> Decision:

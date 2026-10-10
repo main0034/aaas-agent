@@ -95,6 +95,7 @@ def prepare(
     modules_repo: str = "aaas-infra-modules",
     app_repo: str | None = None,
     isolate_app: bool = False,
+    app_at: str | None = None,
 ) -> Workspace:
     if not os.environ.get("GH_TOKEN"):
         raise WorkspaceError(
@@ -119,6 +120,11 @@ def prepare(
         # The repository must already exist - create-app.md section 0. Cloning
         # fails legibly here if it does not, before the agent spends a turn.
         app = _clone(owner, app_repo, root / app_repo)
+        if app_at:
+            # The default branch as it was at `app_at`: for measuring a spec-tester on a
+            # change that has since been merged (finding 28's briefs are on master now).
+            branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=app)
+            _run(["git", "checkout", "--quiet", "-B", branch, app_at], cwd=app)
         if isolate_app:
             isolate(app)
         _run(["git", "config", "user.name", GIT_USER_NAME], cwd=app)

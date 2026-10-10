@@ -338,6 +338,7 @@ async def run(args: argparse.Namespace) -> int:
             owner=args.owner,
             app_repo=args.app_repo if args.task in APP_TASKS else None,
             isolate_app=acceptance,
+            app_at=args.at,
         )
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
@@ -505,31 +506,31 @@ def spec_tmp_dir() -> str:
 
 
 async def run_change(args: argparse.Namespace) -> int:
-    """create-change: brief -> spec-tester -> builder -> hidden tests -> fix rounds.
+    """create-change: brief -> spec-tester(s) -> builder -> hidden tests -> fix rounds.
 
-    One change record (harness/change.py), two roles in one container. The order
+    One change record (harness/change.py), the roles in one container. The order
     is what keeps them independent:
 
-    * the spec-tester runs first, in an isolated checkout of master, before any
-      code for the change exists anywhere
-    * its tests are then held in memory only - its checkout, its CLI session
-      store and its transcript are not on disk while the builder runs
+    * each spec-tester runs first, in its own isolated checkout of master, before
+      any code for the change exists anywhere, and without seeing the other's tests
+    * their tests are then held in memory only - checkouts, CLI session stores and
+      transcripts are not on disk while the builder runs
     * the builder never sees them; the harness commits them after its push, and
       from then on CI runs them and fix rounds may read them
+
+    With --spec-testers 2 (step 2c, finding 28) both files go into the record, each
+    in its own namespace: CI runs the union.
     """
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(args.runs_dir) / run_id
     cid = chg.change_id(args.change, datetime.now(timezone.utc).date())
-    namespace = chg.namespace_for(cid)
     branch = chg.branch_for(cid)
+    letters = [chr(ord("A") + i) for i in range(args.spec_testers)] if args.spec_testers > 1 else [""]
     print(f"\033[1mRun {run_id}\033[0m  ({run_dir})\n\033[1mChange {cid}\033[0m  (branch {branch})\n")
 
     print("Preparing workspace…")
     try:
         workspace = ws.prepare(run_dir / "workspace", owner=args.owner, app_repo=args.app_repo)
-        # Outside run_dir, so nothing of it is left under the mounted directory.
-        spec_root = Path(tempfile.mkdtemp(prefix="spec-", dir=spec_tmp_dir()))
-        spec_app = ws.clone_isolated(spec_root / args.app_repo, args.owner, args.app_repo)
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
         return 2
@@ -541,48 +542,13 @@ async def run_change(args: argparse.Namespace) -> int:
             return 2
     builder_prompt = (workspace.deployments / "agent" / "PROMPT.md").read_text(encoding="utf-8")
     spec_prompt = (workspace.deployments / spec_runbook).read_text(encoding="utf-8")
-
-    acc_dir = spec_app / ACCEPTANCE_DIR
-    acc_dir.mkdir(parents=True, exist_ok=True)
-    if not (acc_dir / ACCEPTANCE_BASE.name).exists():
-        # Older app repos do not carry the base class yet.
-        shutil.copy(ACCEPTANCE_BASE, acc_dir / ACCEPTANCE_BASE.name)
-    spec_ws = ws.Workspace(root=spec_root, deployments=workspace.deployments, reference=workspace.reference, app=spec_app)
-
-    spec_policy = ToolPolicy(
-        writable_roots=[acc_dir, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True
-    )
     build_policy = ToolPolicy(writable_roots=[workspace.app, Path("/tmp")], protected_globs=APP_PROTECTED_GLOBS)
-    # The spec-tester's own CLI session store, deleted after it: the CLI keeps every
-    # session's tool calls - the test file included - under its config directory.
-    spec_config = Path(tempfile.mkdtemp(prefix="spec-claude-", dir=spec_tmp_dir()))
 
-    def options(role: str, fix: bool = False) -> ClaudeAgentOptions:
-        if role == "spec":
-            append = spec_prompt + "\n\n" + acceptance_briefing(spec_ws, namespace)
-            policy, cwd = spec_policy, spec_app
-            add_dirs = [str(workspace.reference), str(workspace.deployments)]
-            env = {"GH_TOKEN": "", "CLAUDE_CONFIG_DIR": str(spec_config)}
-        else:
-            append = builder_prompt + "\n\n" + app_briefing(workspace, builder_runbook, fix, False)
-            if not fix:
-                append += "\n\n" + chg.builder_note(cid)
-            policy, cwd = build_policy, workspace.app
-            add_dirs = [str(workspace.reference), str(workspace.deployments)]
-            env = {"GH_TOKEN": os.environ.get("GH_TOKEN", "")}
-        return ClaudeAgentOptions(
-            system_prompt={"type": "preset", "preset": "claude_code", "append": append},
-            allowed_tools=ALLOWED_TOOLS,
-            disallowed_tools=DISALLOWED_TOOLS,
-            permission_mode="bypassPermissions",
-            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(policy)])]},
-            cwd=str(cwd),
-            add_dirs=add_dirs,
-            max_turns=args.max_turns,
-            model=args.model,
-            setting_sources=None,
-            env=env,
-        )
+    def build_options(fix: bool = False) -> ClaudeAgentOptions:
+        append = builder_prompt + "\n\n" + app_briefing(workspace, builder_runbook, fix, False)
+        if not fix:
+            append += "\n\n" + chg.builder_note(cid)
+        return _options(append, build_policy, workspace.app, workspace, {"GH_TOKEN": os.environ.get("GH_TOKEN", "")}, args)
 
     record = RunRecord(
         run_id=run_id,
@@ -592,6 +558,7 @@ async def run_change(args: argparse.Namespace) -> int:
         metadata={
             "change": cid,
             "branch": branch,
+            "spec-testers": args.spec_testers,
             "deployments HEAD": ws.head_sha(workspace.deployments),
             f"{args.app_repo} HEAD": ws.head_sha(workspace.app),
             "runbooks": f"{spec_runbook}, then {builder_runbook}",
@@ -599,40 +566,67 @@ async def run_change(args: argparse.Namespace) -> int:
             "auth": "subscription" if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") else "api-key",
         },
     )
-    spec_record = RunRecord(
-        run_id=f"{run_id}-spec", directory=run_dir / "spec", task="write-acceptance",
-        request=args.request, defer_writes=True,
-        metadata={"change": cid, "namespace": namespace, "runbook": spec_runbook},
-    )
     status = StatusLine()
     held: dict[str, bytes] = {}
+    spec_records: list[tuple[RunRecord, ToolPolicy]] = []
+    scratch: list[Path] = []
+
+    async def spec_tester(letter: str) -> str | None:
+        """One spec-tester session. Returns None, or why its output cannot be used."""
+        namespace = chg.namespace_for(cid) + letter
+        root = Path(tempfile.mkdtemp(prefix="spec-", dir=spec_tmp_dir()))
+        config = Path(tempfile.mkdtemp(prefix="spec-claude-", dir=spec_tmp_dir()))
+        scratch.extend([root, config])
+        app = ws.clone_isolated(root / args.app_repo, args.owner, args.app_repo)
+        acc_dir = app / ACCEPTANCE_DIR
+        acc_dir.mkdir(parents=True, exist_ok=True)
+        if not (acc_dir / ACCEPTANCE_BASE.name).exists():
+            shutil.copy(ACCEPTANCE_BASE, acc_dir / ACCEPTANCE_BASE.name)
+        policy = ToolPolicy(writable_roots=[acc_dir, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True)
+        spec_ws = ws.Workspace(root=root, deployments=workspace.deployments, reference=workspace.reference, app=app)
+        rec = RunRecord(
+            run_id=f"{run_id}-spec{letter}", directory=run_dir / f"spec{('-' + letter) if letter else ''}",
+            task="write-acceptance", request=args.request, defer_writes=True,
+            metadata={"change": cid, "namespace": namespace, "runbook": spec_runbook},
+        )
+        spec_records.append((rec, policy))
+        append = spec_prompt + "\n\n" + acceptance_briefing(spec_ws, namespace)
+        opts = _options(append, policy, app, workspace, {"GH_TOKEN": "", "CLAUDE_CONFIG_DIR": str(config)}, args)
+        print("\033[1m── spec-tester " + (letter + " ") * bool(letter) + "─" * (57 - 2 * bool(letter)) + "\033[0m")
+        before = _snapshot(rec)
+        outcome = await run_session(opts, args.request, rec, status, interactive=False)
+        files = [f for f in sorted(acc_dir.glob("*")) if f.is_file() and f.name != ACCEPTANCE_BASE.name]
+        problems = chg.conform(app, [f for f in files if f.suffix == ".cs"])
+        names = []
+        for f in files:
+            name = f"{letter}-{f.name}" if letter else f.name
+            held[name] = f.read_bytes()
+            names.append(name)
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(config, ignore_errors=True)
+        record.rounds.append({"round": "-", "kind": f"spec-tester {letter}".strip(), **_delta(rec, before), "files": names})
+        record.cost_usd += rec.cost_usd
+        rec.end_reason = f"files: {', '.join(names) or '(none)'}" + (f"; {'; '.join(problems)}" if problems else "")
+        if outcome.stopped_by or not any(n.endswith(".cs") for n in names):
+            return f"spec-tester {letter} wrote no test file ({outcome.stopped_by or 'stopped'})".replace("  ", " ")
+        if problems:
+            return f"spec-tester {letter} broke a convention: {'; '.join(problems)}".replace("  ", " ")
+        return None
 
     async def steps() -> int:
         record.metadata["brief commit"] = chg.start_branch(workspace.app, cid, args.request)[:7]
 
-        # 1. The spec-tester, before any code for the change exists.
-        print("\033[1m── spec-tester " + "─" * 57 + "\033[0m")
-        before = _snapshot(spec_record)
-        outcome = await run_session(options("spec"), args.request, spec_record, status, interactive=False)
-        spec_round = {"round": "-", "kind": "spec-tester", **_delta(spec_record, before)}
-        for f in sorted(acc_dir.glob("*")):
-            if f.is_file() and f.name != ACCEPTANCE_BASE.name:
-                held[f.name] = f.read_bytes()
-        shutil.rmtree(spec_root, ignore_errors=True)
-        shutil.rmtree(spec_config, ignore_errors=True)
-        spec_round["files"] = sorted(held)
-        record.rounds.append(spec_round)
-        record.cost_usd += spec_record.cost_usd
-        if outcome.stopped_by or not any(n.endswith(".cs") for n in held):
-            record.end_reason = (
-                f"the spec-tester wrote no test file ({outcome.stopped_by or 'stopped'}); the builder did not run"
-            )
-            return 1
+        # 1. The spec-testers, before any code for the change exists.
+        for letter in letters:
+            problem = await spec_tester(letter)
+            if problem:
+                record.end_reason = f"{problem}; the builder did not run"
+                return 1
 
-        # 2. The builder. Nothing of the spec-tester's is on disk now.
+        # 2. The builder. Nothing of the spec-testers' is on disk now.
         print("\033[1m── builder " + "─" * 61 + "\033[0m")
         before = _snapshot(record)
-        outcome = await run_session(options("build"), args.request, record, status, interactive=False)
+        outcome = await run_session(build_options(), args.request, record, status, interactive=False)
         record.rounds.append({"round": 0, "kind": "initial", **_delta(record, before)})
         if outcome.stopped_by:
             record.end_reason = f"the builder's session ended early ({outcome.stopped_by})"
@@ -665,18 +659,28 @@ async def run_change(args: argparse.Namespace) -> int:
 
         # 4. Checks, and fix rounds that may read the tests but not change them.
         code = await fix_forward(
-            args, pr, workspace, builder_runbook,
-            lambda fix=False: options("build", fix), record, status, note=chg.fix_note(cid),
+            args, pr, workspace, builder_runbook, build_options, record, status, note=chg.fix_note(cid),
         )
-        if code == 0:
-            final = ck.pr_head(pr)["headRefOid"]
-            touched = chg.verify_untouched(workspace.app, cid, tests_sha, final)
-            if touched:
-                record.end_reason = f"green, but {', '.join(touched)} changed after the harness committed them"
-                return 1
+        if code != 0:
+            return code
+        final = ck.pr_head(pr)["headRefOid"]
+        touched = chg.verify_untouched(workspace.app, cid, tests_sha, final)
+        if touched:
+            record.end_reason = f"green, but {', '.join(touched)} changed after the harness committed them"
+            return 1
+        record.end_reason += "; acceptance tests unchanged since the harness committed them"
+
+        # 5. Auto-merge (step 2c): only a change the deterministic rules allow, and
+        # only when asked. Everything else stays for a human.
+        if args.auto_merge:
+            blockers = chg.merge_blockers(workspace.app, cid, head["baseRefName"], final)
+            record.metadata["auto-merge"] = "; ".join(blockers) or "eligible"
+            if blockers:
+                record.end_reason += f"; not auto-merged: {'; '.join(blockers)}"
             else:
-                record.end_reason += "; acceptance tests unchanged since the harness committed them"
-        return code
+                ck.merge(pr, final)
+                record.end_reason += f"; auto-merged by the harness @ {final[:7]}"
+        return 0
 
     try:
         exit_code = await steps()
@@ -684,22 +688,38 @@ async def run_change(args: argparse.Namespace) -> int:
         record.end_reason = f"harness error: {exc}"
         exit_code = 1
     finally:
-        shutil.rmtree(spec_root, ignore_errors=True)
-        shutil.rmtree(spec_config, ignore_errors=True)
-        spec_record.end_reason = f"tests held for the change: {', '.join(sorted(held)) or '(none)'}"
-        spec_record.finish(spec_policy.denials)
-        record.finish(build_policy.denials + spec_policy.denials)
+        for d in scratch:
+            shutil.rmtree(d, ignore_errors=True)
+        denials = list(build_policy.denials)
+        for rec, policy in spec_records:
+            rec.finish(policy.denials)
+            denials += policy.denials
+        record.finish(denials)
 
     minutes, seconds = divmod(int(record.seconds), 60)
-    print(
-        f"\n\033[1mDone in {minutes}m {seconds}s\033[0m - ${record.cost_usd:.4f} "
-        f"(spec-tester ${spec_record.cost_usd:.4f})"
-    )
+    spec_cost = sum(r.cost_usd for r, _ in spec_records)
+    print(f"\n\033[1mDone in {minutes}m {seconds}s\033[0m - ${record.cost_usd:.4f} (spec-testers ${spec_cost:.4f})")
     for url in record.pr_urls:
         print(f"  PR: {url}")
-    print(f"  Report: {run_dir / 'report.md'}  (spec-tester: {run_dir / 'spec' / 'report.md'})")
+    print(f"  Report: {run_dir / 'report.md'}")
     print(f"\033[1mEnded because:\033[0m {record.end_reason or '(not recorded)'}")
     return exit_code
+
+
+def _options(append: str, policy: ToolPolicy, cwd: Path, workspace: ws.Workspace, env: dict, args) -> ClaudeAgentOptions:  # noqa: ANN001
+    return ClaudeAgentOptions(
+        system_prompt={"type": "preset", "preset": "claude_code", "append": append},
+        allowed_tools=ALLOWED_TOOLS,
+        disallowed_tools=DISALLOWED_TOOLS,
+        permission_mode="bypassPermissions",
+        hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_hook(policy)])]},
+        cwd=str(cwd),
+        add_dirs=[str(workspace.reference), str(workspace.deployments)],
+        max_turns=args.max_turns,
+        model=args.model,
+        setting_sources=None,
+        env=env,
+    )
 
 
 def collect_acceptance(source: Path, dest: Path) -> list[str]:
@@ -920,6 +940,26 @@ def main() -> int:
         help="create-change only: a short name for the change, e.g. item-archive. The "
         "change id is today's date plus this. Defaults to the brief's file name.",
     )
+    parser.add_argument(
+        "--at",
+        default=None,
+        help="write-acceptance only: write the tests against the default branch as it "
+        "was at this commit, to measure a change that has since been merged.",
+    )
+    parser.add_argument(
+        "--spec-testers",
+        type=int,
+        default=1,
+        help="create-change only: independent spec-tester sessions; their tests are "
+        "combined in the change record (step 2c).",
+    )
+    parser.add_argument(
+        "--auto-merge",
+        action="store_true",
+        help="create-change only: merge a green PR when change.merge_blockers finds "
+        "nothing - no migration, no dependency, nothing outside src/, tests/ and the "
+        "change's own record.",
+    )
     parser.add_argument("--owner", default=os.environ.get("AAAS_GITHUB_OWNER", "main0034"))
     parser.add_argument("--runs-dir", default=os.environ.get("AAAS_RUNS_DIR", "runs"))
     parser.add_argument("--run-id", default=None)
@@ -964,6 +1004,12 @@ def main() -> int:
             parser.error("--task create-change needs --change <name> when the request is not @file")
         if not 0 <= args.fix_rounds <= 2:
             parser.error("--fix-rounds must be 0, 1 or 2 - create-app.md section 6 allows two")
+        if not 1 <= args.spec_testers <= 3:
+            parser.error("--spec-testers must be 1, 2 or 3")
+    elif args.at and args.task != "write-acceptance":
+        parser.error("--at only applies to --task write-acceptance")
+    elif args.spec_testers != 1 or args.auto_merge:
+        parser.error("--spec-testers and --auto-merge only apply to --task create-change")
     elif args.fix_rounds:
         if args.task != "create-app":
             parser.error("--fix-rounds is only implemented for --task create-app and create-change")
