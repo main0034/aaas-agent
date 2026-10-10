@@ -493,6 +493,17 @@ async def run(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def spec_tmp_dir() -> str:
+    """Where the spec-tester's checkout and CLI store go: not /tmp.
+
+    /tmp is a writable root for both roles (PR bodies are composed there), so a
+    checkout under /tmp would be writable in full - the policy would no longer
+    confine the spec-tester to its Acceptance directory. The first create-change
+    run had it there (20261010T130041Z).
+    """
+    return str(Path.home())
+
+
 async def run_change(args: argparse.Namespace) -> int:
     """create-change: brief -> spec-tester -> builder -> hidden tests -> fix rounds.
 
@@ -517,7 +528,7 @@ async def run_change(args: argparse.Namespace) -> int:
     try:
         workspace = ws.prepare(run_dir / "workspace", owner=args.owner, app_repo=args.app_repo)
         # Outside run_dir, so nothing of it is left under the mounted directory.
-        spec_root = Path(tempfile.mkdtemp(prefix="spec-"))
+        spec_root = Path(tempfile.mkdtemp(prefix="spec-", dir=spec_tmp_dir()))
         spec_app = ws.clone_isolated(spec_root / args.app_repo, args.owner, args.app_repo)
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
@@ -544,7 +555,7 @@ async def run_change(args: argparse.Namespace) -> int:
     build_policy = ToolPolicy(writable_roots=[workspace.app, Path("/tmp")], protected_globs=APP_PROTECTED_GLOBS)
     # The spec-tester's own CLI session store, deleted after it: the CLI keeps every
     # session's tool calls - the test file included - under its config directory.
-    spec_config = Path(tempfile.mkdtemp(prefix="spec-claude-"))
+    spec_config = Path(tempfile.mkdtemp(prefix="spec-claude-", dir=spec_tmp_dir()))
 
     def options(role: str, fix: bool = False) -> ClaudeAgentOptions:
         if role == "spec":
@@ -645,6 +656,12 @@ async def run_change(args: argparse.Namespace) -> int:
         tests_sha = chg.add_tests(workspace.app, cid, sorted(acc_out.iterdir()))
         record.metadata["tests commit"] = tests_sha[:7]
         print(f"\n\033[1mAcceptance tests committed to {branch} @ {tests_sha[:7]}\033[0m")
+        # GitHub updates a PR's head a few seconds after the push. Reading it sooner
+        # judged the builder's commit, without the tests, and started a fix round on
+        # it (20261010T130041Z).
+        if not ck.wait_for_head(pr, tests_sha, timeout=args.checks_timeout):
+            record.end_reason = f"the PR's head never became the tests commit {tests_sha[:7]}"
+            return 1
 
         # 4. Checks, and fix rounds that may read the tests but not change them.
         code = await fix_forward(

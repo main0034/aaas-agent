@@ -135,8 +135,9 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
         ws.isolate(app)
         return app
 
-    (tmp_path / "tmpdir").mkdir()
-    monkeypatch.setattr(m.tempfile, "tempdir", str(tmp_path / "tmpdir"))
+    # Like the real one, outside /tmp: /tmp is a writable root, and pytest's tmp_path is under it.
+    spec_tmp = Path(m.tempfile.mkdtemp(prefix="aaas-test-", dir=Path.home()))
+    monkeypatch.setattr(m, "spec_tmp_dir", lambda: str(spec_tmp))
     monkeypatch.setattr(ws, "prepare", fake_prepare)
     monkeypatch.setattr(ws, "clone_isolated", fake_isolated)
     monkeypatch.setattr(ws, "head_sha", lambda repo: "0" * 40)
@@ -147,6 +148,8 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
         cwd = Path(options.cwd)
         if options.env.get("GH_TOKEN") == "":  # the spec-tester
             seen["spec_config"] = options.env["CLAUDE_CONFIG_DIR"]
+            policy = options.hooks["PreToolUse"][0].hooks[0]
+            seen["src_write"] = await policy({"tool_name": "Write", "tool_input": {"file_path": str(cwd / "src/App/Program.cs")}}, None, None)
             (cwd / m.ACCEPTANCE_DIR / "ThingAcceptance.cs").write_text(f"// {MARKER}\n")
             (cwd / m.ACCEPTANCE_DIR / "NOTES.md").write_text("notes\n")
             record.append_message({"tool": "Write", "content": MARKER})
@@ -155,7 +158,7 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
         if "Fix round" in message:
             raise AssertionError("no fix round expected")
         # The builder: look everywhere a curious session might.
-        hits = subprocess.run(["grep", "-rl", MARKER, str(tmp_path)], capture_output=True, text=True).stdout
+        hits = subprocess.run(["grep", "-rl", MARKER, str(tmp_path), str(spec_tmp)], capture_output=True, text=True).stdout
         seen["hits"] = hits.split()
         seen["spec_config_exists"] = Path(seen["spec_config"]).exists()
         seen["builder_note"] = "change/" in options.system_prompt["append"]
@@ -169,13 +172,26 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(m, "run_session", fake_session)
 
+    stale = {"left": 2, "last": None}
+
     def pr_head(_pr: ck.PullRequest) -> dict:
         sha = git("rev-parse", f"change/{seen['cid']}", cwd=origin)
+        # GitHub lags a push: report the previous head a couple of times after it moves.
+        if stale["last"] and sha != stale["last"] and stale["left"] > 0:
+            stale["left"] -= 1
+            sha = stale["last"]
+        stale["last"] = sha
         return {"headRefOid": sha, "headRefName": f"change/{seen['cid']}", "baseRefName": "master"}
 
     monkeypatch.setattr(ck, "pr_head", pr_head)
-    monkeypatch.setattr(ck, "check_runs", lambda p, sha: [ck.CheckRun(1, "test", "completed", "success"),
-                                                        ck.CheckRun(2, "build", "completed", "success")])
+    checked: list[str] = []
+
+    def check_runs(p: ck.PullRequest, sha: str) -> list[ck.CheckRun]:
+        checked.append(sha)
+        return [ck.CheckRun(1, "test", "completed", "success"), ck.CheckRun(2, "build", "completed", "success")]
+
+    monkeypatch.setattr(ck, "check_runs", check_runs)
+    monkeypatch.setattr(ck.time, "sleep", lambda s: None)
     real_wait = ck.wait_for_checks
     monkeypatch.setattr(ck, "wait_for_checks", lambda fetch, **kw: real_wait(
         fetch, sleep=lambda s: None, settle=0, **{k: v for k, v in kw.items() if k != "on_poll"}))
@@ -190,8 +206,12 @@ def test_builder_cannot_find_the_tests(origin: Path, tmp_path: Path, monkeypatch
 
     assert seen["hits"] == [], f"the builder could read the spec-tester's output: {seen['hits']}"
     assert seen["spec_config_exists"] is False
+    assert seen["src_write"]["hookSpecificOutput"]["permissionDecision"] == "deny"
+    spec_tmp.rmdir()  # empty: run_change removed everything it put there
     assert seen["builder_note"]
     assert code == 0
+    tests_commit = git("rev-parse", f"change/{seen['cid']}", cwd=origin)
+    assert set(checked) == {tests_commit}, "checks were read on a commit without the tests"
     report = (runs / "r1" / "report.md").read_text()
     assert "acceptance tests unchanged" in report
     assert (runs / "r1" / "spec" / "transcript.jsonl").read_text().count(MARKER) == 1

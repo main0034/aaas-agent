@@ -263,6 +263,28 @@ def pr_head(pr: PullRequest, run: Runner = gh) -> dict:
     return json.loads(out)
 
 
+def wait_for_head(
+    pr: PullRequest,
+    sha: str,
+    *,
+    timeout: float = 300,
+    poll: float = 3,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Wait until the PR reports `sha` as its head - GitHub lags a push by seconds."""
+    started = clock()
+    while True:
+        try:
+            if pr_head(pr)["headRefOid"] == sha:
+                return True
+        except ChecksError:
+            pass
+        if clock() - started >= timeout:
+            return False
+        sleep(poll)
+
+
 def check_runs(pr: PullRequest, sha: str, run: Runner = gh) -> list[CheckRun]:
     out = run(["api", f"repos/{pr.slug}/commits/{sha}/check-runs?per_page=100"])
     data = json.loads(out)
