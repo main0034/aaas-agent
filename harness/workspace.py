@@ -127,6 +127,19 @@ def prepare(
     return Workspace(root=root, deployments=deployments, reference=reference_root, app=app)
 
 
+def clone_isolated(dest: Path, owner: str, app_repo: str) -> Path:
+    """A second, isolated checkout of the app's default branch, for the spec-tester.
+
+    create-change runs both roles in one container; the builder's checkout is the
+    normal one from prepare(), and this one has no remote and no other refs.
+    """
+    app = _clone(owner, app_repo, dest)
+    isolate(app)
+    _run(["git", "config", "user.name", GIT_USER_NAME], cwd=app)
+    _run(["git", "config", "user.email", GIT_USER_EMAIL], cwd=app)
+    return app
+
+
 def isolate(repo: Path) -> None:
     """Cut a checkout off from everything but the default branch's current commit.
 

@@ -86,6 +86,31 @@ turns, cost, CI verdict and wait) and the run's last line says why it ended.
 build/test/format, so CI meets the code first. It exists to produce a red check
 on purpose; fix rounds are never told it.
 
+### A change with hidden acceptance tests (`--task create-change`)
+
+```bash
+./run.sh --task create-change --app-repo aaas-app-demo --request @briefs/item-archive.md --fix-rounds 2
+```
+
+One change record in the app repository, `changes/<date>-<name>/` (`harness/change.py`):
+
+1. the harness commits the request as `changes/<id>/brief.md` on branch `change/<id>`
+2. the **spec-tester** (`write-acceptance.md`) writes acceptance tests from the request in
+   an isolated checkout of `master`, before any code for the change exists
+3. its checkout, CLI session store and transcript are removed from disk; the tests are held
+   in memory
+4. the **builder** (`create-app.md`) writes the change on `change/<id>` and opens the PR
+5. the harness commits the tests into `changes/<id>/` and pushes; CI's endpoint tests run
+   them, because the test project compiles `changes/**/*.cs`
+6. fix-forward as above; fix rounds may read the tests, not change them. Before reporting
+   green the harness checks `changes/<id>/` is byte-identical to its own commit
+
+Every harness commit under `changes/` carries an `AaaS-Change: <id>` trailer, and the app's
+CI fails a PR in which any other commit touches `changes/`. After the squash merge, `master`
+has the request, the code and its acceptance tests in one commit. The spec-tester's own
+record is in `runs/<id>/spec/`. `--change <name>` names the change; it defaults to the
+brief's file name.
+
 Output lands in `runs/<timestamp>/`: `report.md`, `report.json`,
 `transcript.jsonl`, and the `workspace/` the agent worked in — left in place on
 purpose, because the fastest way to understand a confusing run is to look at the

@@ -69,9 +69,17 @@ class RunRecord:
 
     # -- writing -----------------------------------------------------------
 
+    # True: write nothing to disk until finish(). For a session whose output another
+    # session in the same container must not find - the spec-tester's, while the
+    # builder runs (harness/change.py). Its transcript holds the tests verbatim.
+    defer_writes: bool = False
+
     def __post_init__(self) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self._transcript = (self.directory / "transcript.jsonl").open("a", encoding="utf-8")
+        self._buffer: list[str] = []
+        self._transcript = None
+        if not self.defer_writes:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self._transcript = (self.directory / "transcript.jsonl").open("a", encoding="utf-8")
 
     def append_message(self, message: Any) -> None:
         try:
@@ -81,6 +89,9 @@ class RunRecord:
             )
         except (TypeError, ValueError):
             payload = json.dumps({"t": round(time.time() - self.started_at, 3), "raw": str(message)})
+        if self._transcript is None:
+            self._buffer.append(payload)
+            return
         self._transcript.write(payload + "\n")
         self._transcript.flush()
 
@@ -106,7 +117,13 @@ class RunRecord:
     def finish(self, denials: list[Any]) -> None:
         self.ended_at = time.time()
         self.denials = denials
-        self._transcript.close()
+        if self._transcript is None:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            (self.directory / "transcript.jsonl").write_text(
+                "".join(line + "\n" for line in self._buffer), encoding="utf-8"
+            )
+        else:
+            self._transcript.close()
         (self.directory / "report.md").write_text(self.render(), encoding="utf-8")
         (self.directory / "report.json").write_text(
             json.dumps(self.as_dict(), indent=2, default=_default), encoding="utf-8"
