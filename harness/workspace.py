@@ -96,6 +96,7 @@ def prepare(
     app_repo: str | None = None,
     isolate_app: bool = False,
     app_at: str | None = None,
+    keep_from_tip: tuple[str, ...] = (),
 ) -> Workspace:
     if not os.environ.get("GH_TOKEN"):
         raise WorkspaceError(
@@ -123,8 +124,16 @@ def prepare(
         if app_at:
             # The default branch as it was at `app_at`: for measuring a spec-tester on a
             # change that has since been merged (finding 28's briefs are on master now).
+            # Files in `keep_from_tip` (the acceptance base class) come from today's tip
+            # when that commit predates them.
+            tip = {f: subprocess.run(["git", "show", f"HEAD:{f}"], cwd=app, capture_output=True, text=True)
+                   for f in keep_from_tip}
             branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=app)
             _run(["git", "checkout", "--quiet", "-B", branch, app_at], cwd=app)
+            for f, shown in tip.items():
+                if shown.returncode == 0 and not (app / f).exists():
+                    (app / f).parent.mkdir(parents=True, exist_ok=True)
+                    (app / f).write_text(shown.stdout, encoding="utf-8")
         if isolate_app:
             isolate(app)
         _run(["git", "config", "user.name", GIT_USER_NAME], cwd=app)

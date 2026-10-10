@@ -37,6 +37,9 @@ from .workspace import _run
 
 TRAILER = "AaaS-Change"
 CHANGES_DIR = Path("changes")
+# Pending requests, written by the requester (requests/TEMPLATE.md). Starting a change
+# moves one into changes/<id>/brief.md, so it is pending or recorded, never both.
+REQUESTS_DIR = Path("requests")
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -75,20 +78,29 @@ def change_dir(repo: Path, cid: str) -> Path:
 
 
 def _commit(repo: Path, message: str, cid: str) -> str:
-    _run(["git", "add", "--", str(CHANGES_DIR / cid)], cwd=repo)
+    # Anything else in the commit (a `git mv` out of requests/) is already staged.
+    _run(["git", "add", "-A", "--", str(CHANGES_DIR / cid)], cwd=repo)
     _run(["git", "commit", "--quiet", "-m", message, "--trailer", f"{TRAILER}: {cid}"], cwd=repo)
     return _run(["git", "rev-parse", "HEAD"], cwd=repo)
 
 
-def start_branch(repo: Path, cid: str, brief: str) -> str:
-    """Branch off the checked-out default branch, commit the brief, push. Returns the sha."""
+def start_branch(repo: Path, cid: str, brief: str, request_file: Path | None = None) -> str:
+    """Branch off the checked-out default branch, commit the brief, push. Returns the sha.
+
+    With `request_file` (requests/<name>.md in this checkout), the brief is that file,
+    moved into the record in the same commit.
+    """
     branch = branch_for(cid)
     d = change_dir(repo, cid)
     if d.exists():
         raise ChangeError(f"{CHANGES_DIR / cid} already exists on the default branch; pick another id")
     _run(["git", "checkout", "--quiet", "-b", branch], cwd=repo)
     d.mkdir(parents=True)
-    (d / "brief.md").write_text(brief.strip() + "\n", encoding="utf-8")
+    if request_file is not None:
+        rel = request_file.relative_to(repo)
+        _run(["git", "mv", str(rel), str(CHANGES_DIR / cid / "brief.md")], cwd=repo)
+    else:
+        (d / "brief.md").write_text(brief.strip() + "\n", encoding="utf-8")
     sha = _commit(repo, f"change({cid}): the request", cid)
     _run(["git", "push", "--quiet", "-u", "origin", branch], cwd=repo)
     return sha
@@ -127,7 +139,10 @@ def builder_note(cid: str) -> str:
 The harness has created branch `{branch_for(cid)}` and checked it out. The request is
 committed on it as `{CHANGES_DIR / cid / 'brief.md'}`. Work on this branch and push to
 it: section 3's `git checkout -b` does not apply, and do not create another branch.
-Start the pull request body with the line `Change: {cid}`.
+Start the pull request body with the line `Change: {cid}`. Nobody can answer a
+question during this run: where the request is silent, make the smallest reasonable
+choice, and say what you chose in the pull request. Anything under "Open questions"
+in the request is for a human: leave it out, and say so.
 
 `changes/` is this application's record of changes: for each one, the request it was
 built from and the acceptance tests written from that request by someone who never

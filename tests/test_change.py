@@ -40,6 +40,8 @@ def origin(tmp_path: Path) -> Path:
     for k, v in (("user.name", "t"), ("user.email", "t@t")):
         git("config", k, v, cwd=seed)
     (seed / "README.md").write_text("app\n")
+    (seed / "tests/App.Tests/Acceptance").mkdir(parents=True)
+    (seed / "tests/App.Tests/Acceptance/AcceptanceBase.cs").write_text("// base\n")
     git("add", ".", cwd=seed)
     git("commit", "--quiet", "-m", "init", cwd=seed)
     git("push", "--quiet", "origin", "master", cwd=seed)
@@ -262,3 +264,24 @@ def test_conform_reports_a_test_without_arrange_act_assert(tmp_path: Path) -> No
     problems = chg.conform(tmp_path, [good, bad])
     assert len(problems) == 1 and "expression body" in problems[0]
     assert chg.conform(tmp_path / "nowhere", []) == []
+
+
+def test_a_request_in_the_repo_moves_into_the_record(origin: Path, tmp_path: Path) -> None:
+    seed = clone(origin, tmp_path / "seed2")
+    (seed / "requests").mkdir()
+    (seed / "requests" / "archive.md").write_text("Archive done items.\n")
+    (seed / "requests" / "other.md").write_text("Something else.\n")
+    git("add", ".", cwd=seed)
+    git("commit", "--quiet", "-m", "request", cwd=seed)
+    git("push", "--quiet", "origin", "master", cwd=seed)
+
+    repo = clone(origin, tmp_path / "app")
+    cid = "2026-10-10-archive"
+    sha = chg.start_branch(repo, cid, "(ignored)", repo / "requests" / "archive.md")
+
+    files = git("ls-tree", "-r", "--name-only", sha, cwd=repo).splitlines()
+    assert f"changes/{cid}/brief.md" in files
+    assert "requests/archive.md" not in files
+    assert "requests/other.md" in files
+    assert git("show", f"{sha}:changes/{cid}/brief.md", cwd=repo) == "Archive done items."
+    assert git("log", "-1", "--format=%(trailers:key=AaaS-Change,valueonly)", sha, cwd=repo) == cid

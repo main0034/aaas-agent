@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+# Scratch requests for ad-hoc runs. App requests live in the app repo's requests/.
+briefs/
