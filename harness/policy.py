@@ -241,6 +241,8 @@ APP_PROTECTED_GLOBS: tuple[str, ...] = (
     # The change record: requests and their acceptance tests (harness/change.py).
     # Written by the harness with git, never by an agent's tool call.
     "changes/",
+    # Pending requests are the requester's; the harness moves one when a change starts.
+    "requests/",
 )
 
 # write-acceptance: writes are confined to the acceptance directory, and the base

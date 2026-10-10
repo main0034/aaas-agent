@@ -12,7 +12,7 @@
 #
 # Usage:
 #   ./run.sh --request "an internal tool for booking meeting rooms"
-#   ./run.sh --request @briefs/room-booking.md --non-interactive
+#   ./run.sh --task create-change --app-repo aaas-app-demo --change item-archive --fix-rounds 2
 #   ./run.sh --task create-deployment --request "..." --model <model-id>
 
 set -euo pipefail
@@ -88,7 +88,7 @@ fi
 # both leaks one run into another and makes the measurement worthless
 # (FINDINGS.md #23). The run id is chosen here so only that directory exists.
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$RUNS_DIR/$RUN_ID"
+mkdir -p "$RUNS_DIR/$RUN_ID" "$HERE/briefs"
 
 # Two credentials in. This run's directory writable for the record, briefs/
 # read-only so a request can be kept in a file and edited without rebuilding

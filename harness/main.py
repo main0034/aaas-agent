@@ -76,7 +76,9 @@ TASKS = {
 APP_TASKS = {"create-app", "write-acceptance", "create-change"}
 
 ACCEPTANCE_DIR = Path("tests/App.Tests/Acceptance")
-ACCEPTANCE_BASE = Path(__file__).parent / "acceptance" / "AcceptanceBase.cs"
+# The spec-tester's base class. It belongs to the app (the template ships it); the
+# harness only checks it is there.
+ACCEPTANCE_BASE = ACCEPTANCE_DIR / "AcceptanceBase.cs"
 
 
 def briefing(
@@ -339,6 +341,7 @@ async def run(args: argparse.Namespace) -> int:
             app_repo=args.app_repo if args.task in APP_TASKS else None,
             isolate_app=acceptance,
             app_at=args.at,
+            keep_from_tip=(str(ACCEPTANCE_BASE),),
         )
     except ws.WorkspaceError as exc:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
@@ -360,8 +363,9 @@ async def run(args: argparse.Namespace) -> int:
         # builds and opens PRs. This one only writes tests, from the runbook alone.
         system_prompt = runbook_path.read_text(encoding="utf-8")
         acc_dir = workspace.app / ACCEPTANCE_DIR
-        acc_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(ACCEPTANCE_BASE, acc_dir / ACCEPTANCE_BASE.name)
+        if not (workspace.app / ACCEPTANCE_BASE).is_file():
+            print(f"\033[31m{args.app_repo} has no {ACCEPTANCE_BASE}; it comes from aaas-app-template.\033[0m", file=sys.stderr)
+            return 2
     else:
         prompt_path = workspace.deployments / "agent" / "PROMPT.md"
         system_prompt = prompt_path.read_text(encoding="utf-8")
@@ -535,6 +539,21 @@ async def run_change(args: argparse.Namespace) -> int:
         print(f"\033[31m{exc}\033[0m", file=sys.stderr)
         return 2
 
+    request_file = None
+    if args.request is None:
+        # The usual way since the change record: the requester commits
+        # requests/<name>.md to the app repo, and the harness moves it into the record.
+        request_file = workspace.app / chg.REQUESTS_DIR / f"{args.change}.md"
+        if args.change == "TEMPLATE" or not request_file.is_file():
+            pending = sorted(p.stem for p in (workspace.app / chg.REQUESTS_DIR).glob("*.md") if p.stem != "TEMPLATE")
+            print(
+                f"\033[31mNo request {chg.REQUESTS_DIR}/{args.change}.md on {args.app_repo}'s default branch.\033[0m "
+                f"Pending: {', '.join(pending) or '(none)'}",
+                file=sys.stderr,
+            )
+            return 2
+        args.request = request_file.read_text(encoding="utf-8")
+
     builder_runbook, spec_runbook = TASKS["create-change"], TASKS["write-acceptance"]
     for rb in (builder_runbook, spec_runbook):
         if not (workspace.deployments / rb).is_file():
@@ -579,9 +598,8 @@ async def run_change(args: argparse.Namespace) -> int:
         scratch.extend([root, config])
         app = ws.clone_isolated(root / args.app_repo, args.owner, args.app_repo)
         acc_dir = app / ACCEPTANCE_DIR
-        acc_dir.mkdir(parents=True, exist_ok=True)
-        if not (acc_dir / ACCEPTANCE_BASE.name).exists():
-            shutil.copy(ACCEPTANCE_BASE, acc_dir / ACCEPTANCE_BASE.name)
+        if not (app / ACCEPTANCE_BASE).is_file():
+            raise ws.WorkspaceError(f"{args.app_repo} has no {ACCEPTANCE_BASE}; it comes from aaas-app-template")
         policy = ToolPolicy(writable_roots=[acc_dir, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True)
         spec_ws = ws.Workspace(root=root, deployments=workspace.deployments, reference=workspace.reference, app=app)
         rec = RunRecord(
@@ -614,7 +632,7 @@ async def run_change(args: argparse.Namespace) -> int:
         return None
 
     async def steps() -> int:
-        record.metadata["brief commit"] = chg.start_branch(workspace.app, cid, args.request)[:7]
+        record.metadata["brief commit"] = chg.start_branch(workspace.app, cid, args.request, request_file)[:7]
 
         # 1. The spec-testers, before any code for the change exists.
         for letter in letters:
@@ -925,8 +943,9 @@ def main() -> int:
     parser.add_argument("--task", choices=sorted(TASKS), default="create-deployment")
     parser.add_argument(
         "--request",
-        required=True,
-        help="The request, or @path to read it from a file.",
+        default=None,
+        help="The request, or @path to read it from a file. create-change reads it from "
+        "the app repo's requests/<change>.md instead when this is left out.",
     )
     parser.add_argument(
         "--app-repo",
@@ -998,10 +1017,10 @@ def main() -> int:
     if args.task == "create-change":
         # Always waits for checks; --fix-rounds 0 reports the verdict without fixing.
         args.non_interactive = True
-        if args.change is None and args.request.startswith("@"):
+        if args.change is None and args.request and args.request.startswith("@"):
             args.change = Path(args.request[1:]).stem
         if not args.change:
-            parser.error("--task create-change needs --change <name> when the request is not @file")
+            parser.error("--task create-change needs --change <name>: the request is requests/<name>.md in the app repo")
         if not 0 <= args.fix_rounds <= 2:
             parser.error("--fix-rounds must be 0, 1 or 2 - create-app.md section 6 allows two")
         if not 1 <= args.spec_testers <= 3:
@@ -1017,7 +1036,9 @@ def main() -> int:
             parser.error("--fix-rounds must be 1 or 2 - create-app.md section 6 allows two")
         args.non_interactive = True
 
-    if args.request.startswith("@"):
+    if args.request is None and args.task != "create-change":
+        parser.error("--request is required")
+    if args.request and args.request.startswith("@"):
         brief = Path(args.request[1:])
         if not brief.is_file():
             # This runs inside the container, where only a couple of host

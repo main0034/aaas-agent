@@ -19,7 +19,7 @@ harness/policy.py         tool allow/deny, as a PreToolUse hook
 harness/workspace.py      clones the repos the agent works in
 harness/report.py         timings, cost, tool histogram, refusals, PR URLs
 tests/test_policy.py      the policy is the only part that decides anything
-briefs/                   example requests
+briefs/                   gitignored scratch inbox for ad-hoc --request @file; app requests live in the app repo
 runs/                     transcripts and reports (gitignored)
 ```
 
@@ -44,7 +44,7 @@ claude setup-token                      # once; one-year token, no API billing
 export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 export GH_TOKEN=github_pat_...          # see below
 
-./run.sh --request @briefs/room-booking.md
+./run.sh --request "an internal tool for booking meeting rooms"
 ./run.sh --task create-app --app-repo aaas-app-demo --request @briefs/item-done.md --non-interactive
 ```
 
@@ -89,12 +89,13 @@ on purpose; fix rounds are never told it.
 ### A change with hidden acceptance tests (`--task create-change`)
 
 ```bash
-./run.sh --task create-change --app-repo aaas-app-demo --request @briefs/item-archive.md --fix-rounds 2
+./run.sh --task create-change --app-repo aaas-app-demo --change item-archive --fix-rounds 2
 ```
 
-One change record in the app repository, `changes/<date>-<name>/` (`harness/change.py`):
+The request is `requests/<name>.md` in the app repository, written from its `requests/TEMPLATE.md`
+and committed by the requester. One change record, `changes/<date>-<name>/` (`harness/change.py`):
 
-1. the harness commits the request as `changes/<id>/brief.md` on branch `change/<id>`
+1. the harness moves the request to `changes/<id>/brief.md` on branch `change/<id>`
 2. the **spec-tester** (`write-acceptance.md`) writes acceptance tests from the request in
    an isolated checkout of `master`, before any code for the change exists
 3. its checkout, CLI session store and transcript are removed from disk; the tests are held
@@ -108,8 +109,12 @@ One change record in the app repository, `changes/<date>-<name>/` (`harness/chan
 Every harness commit under `changes/` carries an `AaaS-Change: <id>` trailer, and the app's
 CI fails a PR in which any other commit touches `changes/`. After the squash merge, `master`
 has the request, the code and its acceptance tests in one commit. The spec-tester's own
-record is in `runs/<id>/spec/`. `--change <name>` names the change; it defaults to the
-brief's file name.
+record is in `runs/<id>/spec/`. `--change <name>` picks the request; `--request` overrides it with
+ad-hoc text. `--spec-testers 2` runs two independent spec-testers and keeps both files;
+`--auto-merge` lets the harness merge a green change that `change.merge_blockers` allows.
+
+**Nothing in this repository is about one application.** Requests, change records and
+acceptance tests live in the app repo; the harness only orders the roles and keeps them apart.
 
 Output lands in `runs/<timestamp>/`: `report.md`, `report.json`,
 `transcript.jsonl`, and the `workspace/` the agent worked in — left in place on
