@@ -191,6 +191,8 @@ class RunRecord:
         lines += ["## Outcome", ""]
         if self.pr_urls:
             lines += [f"- Pull request: {url}" for url in self.pr_urls]
+        elif self.task in {"intake", "report", "write-acceptance"}:
+            lines.append("- No pull request: this role does not open one.")
         else:
             lines.append("- **No pull request was opened.** The run did not reach its goal.")
         lines.append("")

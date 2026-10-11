@@ -908,7 +908,8 @@ async def fix_forward(
             fixes = round_no
             record.end_reason = (
                 "checks green on first push" if fixes == 0
-                else f"checks green after {fixes} fix round{'s' if fixes > 1 else ''} - ready for a human to merge"
+                else f"checks green after {fixes} fix round{'s' if fixes > 1 else ''}"
+                + ("" if getattr(args, "auto_merge", False) else " - ready for a human to merge")
             )
             return 0
         if v.state == ck.PENDING:

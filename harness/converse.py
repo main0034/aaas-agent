@@ -203,6 +203,7 @@ class Conversation:
                 body = path.read_text(encoding="utf-8")
                 ready = {"name": it.change_name(path), "title": body.splitlines()[0][2:].strip(), "path": path}
                 self._note(f"request ready: {path.name} (${self.record.cost_usd:.2f} so far)")
+                self.record.end_reason = f"request written: {path.name}"
             with self.lock:
                 self.ready = ready
             self._say("assistant", reply or "(no answer - please say that again)")
