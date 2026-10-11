@@ -209,7 +209,7 @@ ALLOWED_DOTNET_EF_MIGRATIONS: set[str] = {
 
 # python3 exists solely to run the repositories' own check scripts: the schema
 # validator (deployments) and the test layout check (apps, AGENT.md "Conventions").
-VALIDATOR_RE = re.compile(r"(^|/)scripts/(validate_deployment|check-test-layout)\.py$")
+VALIDATOR_RE = re.compile(r"(^|/)scripts/(validate_deployment|check-test-layout|check-pages)\.py$")
 # `dotnet csharpier`: the formatter AGENT.md names, pinned in dotnet-tools.json.
 ALLOWED_DOTNET_CSHARPIER: set[str] = {"format", "check"}
 
@@ -406,14 +406,14 @@ class ToolPolicy:
             return Decision(
                 False,
                 "python3 is available only to run the repository's check scripts "
-                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`). "
+                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`, `scripts/check-pages.py`). "
                 "An interactive interpreter is not.",
             )
         if not VALIDATOR_RE.search(args[0]):
             return Decision(
                 False,
                 "python3 is available only to run the repository's check scripts "
-                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`). "
+                "(`scripts/validate_deployment.py`, `scripts/check-test-layout.py`, `scripts/check-pages.py`). "
                 "Use jq for JSON and the Read tool for files.",
             )
         if any(t in {"-c", "-m"} for t in tokens):

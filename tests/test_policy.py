@@ -264,6 +264,7 @@ def test_offline_is_off_by_default(policy: ToolPolicy) -> None:
         ("dotnet csharpier check .", True),
         ("dotnet csharpier server", False),
         ("python3 scripts/check-test-layout.py --files tests/App.Tests/A.cs", True),
+        ("python3 scripts/check-pages.py", True),
         ("python3 scripts/validate_deployment.py deployments/dev/x", True),
         ("python3 scripts/evil.py", False),
         ("python3 -c 'print(1)'", False),

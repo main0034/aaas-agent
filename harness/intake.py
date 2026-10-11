@@ -120,6 +120,7 @@ def report_facts(
     app_url: str = "",
     deploy_problem: str = "",
     stopped_because: str = "",
+    screens: list[str] | None = None,
 ) -> str:
     """What happened, as facts. The reporter writes the user's message from this alone."""
     facts = [f"- The request: {title}"]
@@ -136,6 +137,8 @@ def report_facts(
             facts.append(f"- The app's address: {app_url}")
         if deploy_problem:
             facts.append(f"- Why it did not go live: {deploy_problem}")
+    if built and screens:
+        facts.extend(screens)
     if stopped_because:
         facts.append(f"- Where it stopped, in the operator's words: {stopped_because}")
     facts.append("- If it did not go live, the version the user had before keeps running, unchanged, and the operator has the details")
