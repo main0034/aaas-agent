@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -50,6 +51,7 @@ from claude_agent_sdk import (
 from . import change as chg
 from . import checks as ck
 from . import workspace as ws
+from . import screens as sc
 from .workspace_pr import checkout_pr_branch, diff_stat
 from .policy import (
     ACCEPTANCE_PROTECTED_GLOBS,
@@ -701,6 +703,11 @@ async def run_change(args: argparse.Namespace, progress=None, result: dict | Non
             record.end_reason = f"green, but {', '.join(touched)} changed after the harness committed them"
             return 1
         record.end_reason += "; acceptance tests unchanged since the harness committed them"
+        try:
+            result["screens"] = sc.changed(workspace.app, head["baseRefName"], final)
+            record.metadata["screens"] = ", ".join(f"{x.path} ({x.title})" for x in result["screens"]) or "none"
+        except (OSError, subprocess.CalledProcessError) as exc:
+            record.metadata["screens"] = f"unknown: {exc}"
 
         # 5. Auto-merge (step 2c): only a change the deterministic rules allow, and
         # only when asked. Everything else stays for a human.

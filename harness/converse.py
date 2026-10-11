@@ -54,6 +54,7 @@ from . import checks as ck
 from . import deliver as dl
 from . import intake as it
 from . import workspace as ws
+from . import screens as sc
 from .policy import ToolPolicy, make_pre_tool_use_hook
 from .report import RunRecord
 
@@ -256,6 +257,12 @@ class Conversation:
                 delivery = dl.Delivery(False, problem=f"harness error while delivering: {exc}")
             self._note(f"delivery: live={delivery.live} {delivery.pr_url} {delivery.problem}")
         self.step("Done" if delivery and delivery.live else "Stopped")
+        screens = result.get("screens") or []
+        app_url = (delivery.app_url if delivery else "") or self.args.app_url
+        live_problems = None
+        if delivery and delivery.live and screens and app_url:
+            live_problems = await asyncio.to_thread(sc.check_live, app_url, screens)
+            self._note(f"screens: {[x.path for x in screens]} live problems: {live_problems}")
         facts = it.report_facts(
             title=ready["title"],
             built="pr" in result,
@@ -263,7 +270,8 @@ class Conversation:
             merged=bool(result.get("merged")),
             merge_blockers=it.blocker_words(result.get("blockers") or []),
             live=bool(delivery and delivery.live),
-            app_url=(delivery.app_url if delivery else "") or self.args.app_url,
+            app_url=app_url,
+            screens=sc.facts(screens, live_problems) if "pr" in result else None,
             deploy_problem=(delivery.problem if delivery and not delivery.live else ""),
             stopped_because="" if delivery and delivery.live else result.get("end_reason", ""),
         )
