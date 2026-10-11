@@ -162,6 +162,9 @@ class Conversation:
     async def _turn(self, message: str) -> str:
         assert self.client and self.record
         self.record.start_turn()
+        # The SDK's stream holds only the agent's side; without this the transcript of
+        # the first conversation could not show what the user had actually said.
+        self.record.append_message({"role": "user", "text": message})
         await self.client.query(message)
         texts: list[str] = []
         async for msg in self.client.receive_response():
