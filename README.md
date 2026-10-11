@@ -24,7 +24,7 @@ runs/                     transcripts and reports (gitignored)
 ```
 
 ```bash
-uv run pytest -q     # 83 tests, no container needed
+uv run pytest -q     # 180 tests, no container needed
 ```
 
 Dependencies are managed with [uv](https://docs.astral.sh/uv/): `pyproject.toml` declares
@@ -112,6 +112,34 @@ has the request, the code and its acceptance tests in one commit. The spec-teste
 record is in `runs/<id>/spec/`. `--change <name>` picks the request; `--request` overrides it with
 ad-hoc text. `--spec-testers 2` runs two independent spec-testers and keeps both files;
 `--auto-merge` lets the harness merge a green change that `change.merge_blockers` allows.
+
+### A conversation instead of a request file (`--task converse`)
+
+```bash
+./run.sh --task converse --app-repo aaas-app-demo      # then open http://localhost:8765
+```
+
+Roadmap step 5: the §2 user talks; nobody writes a request by hand (`harness/converse.py`).
+The container serves a chat page, published on `127.0.0.1` only, and runs:
+
+1. **intake** (`aaas-deployments/agent/intake.md`): a multi-turn session that reads an
+   isolated checkout of the app and can write one file, `runs/<id>/request-<n>/<name>.md`.
+   No shell, no token. `intake.check_request` decides when the file is a complete request
+   (title, What and why, Rules, a route under Interface, no template left in it); only then
+   does the page show **Go ahead**. An incomplete file goes back to the agent, not the user
+2. **Go ahead** runs `create-change` on that text with `--spec-testers 2 --fix-rounds 2
+   --auto-merge`, exactly as from the command line; the page shows each stage in plain words
+3. if the harness merged it, `harness/deliver.py` follows the deployment PR `release.yml`
+   opens: waits for `gate`, merges it **only if it changes exactly `container_image`** in
+   that deployment's tfvars, and waits for `applied.json` on `master` to name the new image
+   (written after a green readiness gate, D-28). A "Deploy failed" comment ends the wait
+   with its cause
+4. a **reporter** session with no tools at all turns the facts (`runs/<id>/facts-<n>.md`)
+   into the user's words
+
+`runs/<id>/` holds `converse.md` (timings), `intake-<n>/` and `report-<n>/` (transcripts),
+and `change-<n>/`, the change's ordinary run record. Stop with Ctrl-C, or
+`docker stop aaas-converse`.
 
 **Nothing in this repository is about one application.** Requests, change records and
 acceptance tests live in the app repo; the harness only orders the roles and keeps them apart.

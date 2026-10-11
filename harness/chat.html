@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your app</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e3e1da;
+    --me: #1f4e5f; --me-ink: #ffffff; --accent: #2e7d4f; --warn: #a2501b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --muted: #9a988f; --line: #33322f;
+            --me: #3b7a8f; --me-ink: #ffffff; --accent: #5cb27f; --warn: #e08a52; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 140px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 20px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; margin: 8px 0; white-space: pre-wrap; }
+  .assistant { background: var(--panel); border: 1px solid var(--line); }
+  .user { background: var(--me); color: var(--me-ink); margin-left: auto; }
+  .typing { color: var(--muted); font-style: italic; margin: 8px 4px; }
+  .steps { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 16px; margin: 16px 0; }
+  .steps h2 { font-size: 14px; font-weight: 600; color: var(--muted); margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+  .step { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  .step .t { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .step.now::before { content: "● "; color: var(--accent); }
+  .step.done::before { content: "✓ "; color: var(--accent); }
+  .step span:first-child { flex: 1; }
+  .ready { background: var(--panel); border: 1px solid var(--accent); border-radius: 14px; padding: 14px 16px; margin: 16px 0;
+           display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  button { font: inherit; border: 0; border-radius: 10px; padding: 9px 18px; cursor: pointer; }
+  .go { background: var(--accent); color: #fff; font-weight: 600; }
+  .again { background: var(--me); color: #fff; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); }
+  form { max-width: 760px; margin: 0 auto; padding: 12px 16px; display: flex; gap: 8px; }
+  textarea { flex: 1; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+             border-radius: 10px; padding: 9px 12px; resize: none; min-height: 44px; max-height: 160px; }
+  form button { background: var(--me); color: var(--me-ink); }
+  button:disabled, textarea:disabled { opacity: .5; cursor: default; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Change your app</h1>
+  <div id="log"></div>
+  <div id="typing" class="typing" hidden>Thinking…</div>
+  <div id="ready" class="ready" hidden>
+    <span>Ready to build: <strong id="title"></strong></span>
+    <button class="go" id="go">Go ahead</button>
+  </div>
+  <div id="steps" class="steps" hidden><h2>Progress</h2><div id="steplist"></div></div>
+  <div id="again" hidden><button class="again" id="againbtn">Change something else</button></div>
+</main>
+<footer>
+  <form id="f">
+    <textarea id="t" rows="1" placeholder="Write here…" autofocus></textarea>
+    <button id="send">Send</button>
+  </form>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id);
+let shown = -1;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+function linkify(s) { return esc(s).replace(/https:\/\/[^\s)]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`); }
+function mins(sec) { sec = Math.max(0, Math.round(sec)); return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`; }
+
+async function post(path, body) {
+  await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  setTimeout(poll, 300);
+}
+
+function render(s) {
+  if (s.messages.length !== shown) {
+    $("log").innerHTML = s.messages.map((m) => `<div class="msg ${m.role}">${linkify(m.text)}</div>`).join("");
+    shown = s.messages.length;
+    window.scrollTo(0, document.body.scrollHeight);
+  }
+  $("typing").hidden = !(s.busy && s.phase === "intake");
+  $("ready").hidden = !s.ready;
+  $("title").textContent = s.title;
+  const now = Date.now() / 1000;
+  $("steps").hidden = s.steps.length === 0;
+  $("steplist").innerHTML = s.steps.map((st, i) => {
+    const done = st.done !== null || (s.phase === "done");
+    const end = st.done !== null ? st.done : (s.phase === "done" ? st.at : now);
+    const last = i === s.steps.length - 1 && s.phase === "done";
+    return `<div class="step ${last ? "" : done ? "done" : "now"}"><span>${esc(st.text)}</span><span class="t">${last ? "" : mins(end - st.at)}</span></div>`;
+  }).join("");
+  $("again").hidden = s.phase !== "done" || s.busy;
+  const locked = s.busy || s.phase !== "intake";
+  $("t").disabled = locked; $("send").disabled = locked;
+  $("t").placeholder = s.phase === "working" ? "Working on it - you can leave this page open and come back." : "Write here…";
+}
+
+async function poll() {
+  try { render(await (await fetch("/api/state")).json()); } catch (e) { /* the container restarted */ }
+}
+
+$("f").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("t").value.trim();
+  if (!text) return;
+  $("t").value = "";
+  post("/api/say", { text });
+});
+$("t").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("f").requestSubmit(); }
+});
+$("go").addEventListener("click", () => post("/api/go"));
+$("againbtn").addEventListener("click", () => post("/api/again"));
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

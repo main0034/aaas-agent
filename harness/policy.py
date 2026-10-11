@@ -293,12 +293,18 @@ class ToolPolicy:
     protected_globs: tuple[str, ...] = DEPLOYMENTS_PROTECTED_GLOBS
     # True for write-acceptance: no gh, no git network. See GIT_NETWORK_SUBCOMMANDS.
     offline: bool = False
+    # False for intake: no shell at all. The SDK's disallowed_tools already removes
+    # Bash; this refuses it again here, where the refusal is recorded.
+    shell: bool = True
     denials: list[Denial] = field(default_factory=list)
 
     # -- entry point -------------------------------------------------------
 
     def check(self, tool_name: str, tool_input: dict[str, Any]) -> Decision:
-        if tool_name == "Bash":
+        if tool_name == "Bash" and not self.shell:
+            decision = Decision(False, "There is no shell in this task. Read files with Read, Glob and Grep.")
+            detail = str(tool_input.get("command", ""))[:200]
+        elif tool_name == "Bash":
             decision = self._check_bash(str(tool_input.get("command", "")))
             detail = str(tool_input.get("command", ""))[:200]
         elif tool_name in {"Write", "Edit", "NotebookEdit", "MultiEdit"}:

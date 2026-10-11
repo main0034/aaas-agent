@@ -14,6 +14,7 @@
 #   ./run.sh --request "an internal tool for booking meeting rooms"
 #   ./run.sh --task create-change --app-repo aaas-app-demo --change item-archive --fix-rounds 2
 #   ./run.sh --task create-deployment --request "..." --model <model-id>
+#   ./run.sh --task converse --app-repo aaas-app-demo      # then open http://localhost:8765
 
 set -euo pipefail
 
@@ -94,7 +95,15 @@ mkdir -p "$RUNS_DIR/$RUN_ID" "$HERE/briefs"
 # read-only so a request can be kept in a file and edited without rebuilding
 # the image. Nothing else is mounted: a path that exists on the laptop does not
 # exist in here unless it appears on this list.
-exec docker run --rm -it \
+# converse serves a chat page from inside the container. Published on 127.0.0.1
+# only: the page drives agents that push to GitHub, and nothing on the network
+# should be able to reach it. Named, so a watcher can `docker stop aaas-converse`.
+PUBLISH=()
+case " $* " in
+  *" --task converse "*) PUBLISH=(-p "127.0.0.1:${AAAS_PORT:-8765}:8765" --name aaas-converse) ;;
+esac
+
+exec docker run --rm -it ${PUBLISH[@]+"${PUBLISH[@]}"} \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
   -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \

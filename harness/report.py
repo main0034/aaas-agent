@@ -114,6 +114,16 @@ class RunRecord:
         if self.turns:
             self.turns[-1].ended_at = time.time()
 
+    def snapshot(self, denials: list[Any]) -> None:
+        """Write report.md/json now and keep the transcript open: a conversation is
+        recorded after every exchange, and finished only when it ends."""
+        self.denials = list(denials)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / "report.md").write_text(self.render(), encoding="utf-8")
+        (self.directory / "report.json").write_text(
+            json.dumps(self.as_dict(), indent=2, default=_default), encoding="utf-8"
+        )
+
     def finish(self, denials: list[Any]) -> None:
         self.ended_at = time.time()
         self.denials = denials

@@ -70,10 +70,13 @@ TASKS = {
     # Both of the above, in order, on one change record (harness/change.py). The
     # builder follows create-app.md; the spec-tester write-acceptance.md.
     "create-change": "agent/create-app.md",
+    # A conversation with the app's owner that ends in a request, then create-change
+    # and delivery, behind a local web page (harness/converse.py).
+    "converse": "agent/intake.md",
 }
 
 # Tasks that work in an application repository.
-APP_TASKS = {"create-app", "write-acceptance", "create-change"}
+APP_TASKS = {"create-app", "write-acceptance", "create-change", "converse"}
 
 ACCEPTANCE_DIR = Path("tests/App.Tests/Acceptance")
 # The spec-tester's base class. It belongs to the app (the template ships it); the
@@ -509,7 +512,7 @@ def spec_tmp_dir() -> str:
     return str(Path.home())
 
 
-async def run_change(args: argparse.Namespace) -> int:
+async def run_change(args: argparse.Namespace, progress=None, result: dict | None = None) -> int:  # noqa: ANN001
     """create-change: brief -> spec-tester(s) -> builder -> hidden tests -> fix rounds.
 
     One change record (harness/change.py), the roles in one container. The order
@@ -524,7 +527,12 @@ async def run_change(args: argparse.Namespace) -> int:
 
     With --spec-testers 2 (step 2c, finding 28) both files go into the record, each
     in its own namespace: CI runs the union.
+
+    `progress` (converse) is told each stage in the user's words; `result` is filled
+    with what the conversation needs afterwards: the PR, whether it merged, and why not.
     """
+    say = progress or (lambda _s: None)
+    result = result if result is not None else {}
     run_id = args.run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(args.runs_dir) / run_id
     cid = chg.change_id(args.change, datetime.now(timezone.utc).date())
@@ -632,6 +640,7 @@ async def run_change(args: argparse.Namespace) -> int:
         return None
 
     async def steps() -> int:
+        say("Writing down how we will check it works")
         record.metadata["brief commit"] = chg.start_branch(workspace.app, cid, args.request, request_file)[:7]
 
         # 1. The spec-testers, before any code for the change exists.
@@ -642,6 +651,7 @@ async def run_change(args: argparse.Namespace) -> int:
                 return 1
 
         # 2. The builder. Nothing of the spec-testers' is on disk now.
+        say("Building it")
         print("\033[1m── builder " + "─" * 61 + "\033[0m")
         before = _snapshot(record)
         outcome = await run_session(build_options(), args.request, record, status, interactive=False)
@@ -654,6 +664,7 @@ async def run_change(args: argparse.Namespace) -> int:
             record.end_reason = "the builder opened no pull request on the app repository"
             return 1
         pr = ck.parse_pr_url(pr_url)
+        result["pr"] = pr
         head = ck.pr_head(pr)
         if head["headRefName"] != branch:
             record.end_reason = f"the builder's PR is on `{head['headRefName']}`, not the change branch `{branch}`"
@@ -676,11 +687,14 @@ async def run_change(args: argparse.Namespace) -> int:
             return 1
 
         # 4. Checks, and fix rounds that may read the tests but not change them.
+        say("Checking it")
         code = await fix_forward(
             args, pr, workspace, builder_runbook, build_options, record, status, note=chg.fix_note(cid),
+            progress=say,
         )
         if code != 0:
             return code
+        result["green"] = True
         final = ck.pr_head(pr)["headRefOid"]
         touched = chg.verify_untouched(workspace.app, cid, tests_sha, final)
         if touched:
@@ -693,10 +707,12 @@ async def run_change(args: argparse.Namespace) -> int:
         if args.auto_merge:
             blockers = chg.merge_blockers(workspace.app, cid, head["baseRefName"], final)
             record.metadata["auto-merge"] = "; ".join(blockers) or "eligible"
+            result["blockers"] = blockers
             if blockers:
                 record.end_reason += f"; not auto-merged: {'; '.join(blockers)}"
             else:
                 ck.merge(pr, final)
+                result["merged"] = True
                 record.end_reason += f"; auto-merged by the harness @ {final[:7]}"
         return 0
 
@@ -713,6 +729,8 @@ async def run_change(args: argparse.Namespace) -> int:
             rec.finish(policy.denials)
             denials += policy.denials
         record.finish(denials)
+        result.update(end_reason=record.end_reason, cost_usd=record.cost_usd, seconds=record.seconds,
+                      change=cid, app=workspace.app)
 
     minutes, seconds = divmod(int(record.seconds), 60)
     spec_cost = sum(r.cost_usd for r, _ in spec_records)
@@ -852,6 +870,7 @@ async def fix_forward(
     record: RunRecord,
     status: StatusLine,
     note: str = "",
+    progress=None,  # noqa: ANN001
 ) -> int:
     """Wait for the PR's checks; on red, hand the failure to a fresh session.
 
@@ -925,6 +944,8 @@ async def fix_forward(
             runbook=runbook,
             note=note,
         )
+        if progress:
+            progress("Found a problem in its own checks; fixing it")
         print(f"\n\033[1mFix round {round_no + 1}: {', '.join(n for n, _ in failures)} failed\033[0m")
         print("\033[1m" + "─" * 72 + "\033[0m")
 
@@ -1011,7 +1032,20 @@ def main() -> int:
         help="Do not prompt for follow-up input. The agent gets exactly one turn to "
         "finish, so anything it would have asked about must be in the request.",
     )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8765,
+        help="converse only: the port the chat page listens on inside the container. "
+        "run.sh publishes it on 127.0.0.1 only.",
+    )
     args = parser.parse_args()
+    if args.task == "converse":
+        if not args.app_repo:
+            parser.error("--task converse needs --app-repo <name>")
+        from . import converse
+
+        return asyncio.run(converse.serve(args))
     if args.skip_local_checks and args.task != "create-app":
         parser.error("--skip-local-checks only applies to --task create-app")
     if args.task == "create-change":
