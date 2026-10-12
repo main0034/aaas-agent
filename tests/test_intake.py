@@ -99,3 +99,17 @@ def test_intake_policy_has_no_shell_and_one_directory(tmp_path: Path):
     assert not p.check("Write", {"file_path": str(tmp_path / "app" / "src" / "x.cs")}).allow
     assert p.check("Read", {"file_path": "/etc/passwd"}).allow  # reads are the container's business
     assert len(p.denials) == 2
+
+
+def test_check_from_the_command_line(tmp_path) -> None:  # noqa: ANN001 - workbench.sh check
+    import subprocess
+    import sys
+
+    good = tmp_path / "ok.md"
+    good.write_text("# T\n\n## What and why\nx\n\n## Rules\n- r\n\n## Interface\n- `GET /items` - 200\n")
+    bad = tmp_path / "bad.md"
+    bad.write_text("# T\n")
+    run = lambda p: subprocess.run([sys.executable, "-m", "harness.intake", str(p)], capture_output=True, text=True)  # noqa: E731
+    assert run(good).returncode == 0
+    out = run(bad)
+    assert out.returncode == 1 and "`## Rules` is missing" in out.stdout

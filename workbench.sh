@@ -2,9 +2,15 @@
 #
 # The workbench (roadmap step 5a), from an application checkout:
 #
+#   workbench.sh check [name]    is requests/<name>.md complete enough to ship? (no agent, no network)
 #   workbench.sh build [name]    build requests/<name>.md on change/<date>-<name>, no PR
 #   workbench.sh rebuild         the request on this branch changed: build it again
-#   workbench.sh ship            spec-testers, PR, checks, and the D-26 merge
+#   workbench.sh ship [--merge]  spec-testers, the change record, a PR, checks and fix rounds.
+#                                The PR waits for you; --merge lets the harness merge it when
+#                                D-26 allows (no migration, no dependency)
+#
+# The request itself you write with whatever help you like - Rider's AI assistant given
+# requests/TEMPLATE.md and AGENT.md works well - and `check` tells you what is missing.
 #
 # Run it from the app repo (Rider's "Workbench" run configurations do). It does the
 # git a person would otherwise do around a run - commit the request, push it with
@@ -22,14 +28,23 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS="${AAAS_SECRETS_DIR:-$(dirname "$HERE")}"
 cmd="${1:-}"
-name="${2:-}"
+[ $# -gt 0 ] && shift
+name=""
+merge=0
+for a in "$@"; do
+  case "$a" in
+    --merge) merge=1 ;;
+    -*) echo "workbench: unknown option $a" >&2; exit 2 ;;
+    *) name="$a" ;;
+  esac
+done
 
 die() { echo "workbench: $*" >&2; exit 2; }
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 
 case "$cmd" in
-  build | rebuild | ship) ;;
-  *) die "usage: workbench.sh build [name] | rebuild | ship   (from the app repository)" ;;
+  check | build | rebuild | ship) ;;
+  *) die "usage: workbench.sh check [name] | build [name] | rebuild | ship [--merge]   (from the app repository)" ;;
 esac
 
 app="$(git rev-parse --show-toplevel 2>/dev/null)" || die "run this from inside an application checkout"
@@ -46,7 +61,7 @@ if [ -z "$name" ]; then
     change/*) name="$(echo "${current#change/}" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}-//')" ;;
   esac
 fi
-if [ -z "$name" ] && [ "$cmd" = build ]; then
+if [ -z "$name" ] && { [ "$cmd" = build ] || [ "$cmd" = check ]; }; then
   candidates="$(git status --porcelain --untracked-files=all -- requests | sed -E 's/^.. //' | grep -E '\.md$' | grep -v TEMPLATE.md || true)"
   if [ "$(printf '%s' "$candidates" | grep -c . || true)" = 1 ]; then
     name="$(basename "$candidates" .md)"
@@ -56,17 +71,26 @@ fi
 request="requests/$name.md"
 [ "$name" != TEMPLATE ] || die "TEMPLATE is the template, not a request"
 
+# The same completeness check the chat and ship apply (harness/intake.py), run here
+# with the Mac's own python3: it needs nothing but the standard library.
+check_request() {
+  [ -f "$request" ] || die "no $request in this checkout"
+  PYTHONPATH="$HERE" python3 -m harness.intake "$request"
+}
+
 # Credentials, without printing them.
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  [ -f "$SECRETS/.claude-oauth-token-dont-delete" ] || die "no CLAUDE_CODE_OAUTH_TOKEN and no $SECRETS/.claude-oauth-token-dont-delete"
-  CLAUDE_CODE_OAUTH_TOKEN="$(tr -d '\n' < "$SECRETS/.claude-oauth-token-dont-delete")"
-  export CLAUDE_CODE_OAUTH_TOKEN
-fi
-if [ -z "${GH_TOKEN:-}" ]; then
-  [ -f "$SECRETS/.aaas-agent-PAT-dont-delete" ] || die "no GH_TOKEN and no $SECRETS/.aaas-agent-PAT-dont-delete"
-  GH_TOKEN="$(tr -d '\n' < "$SECRETS/.aaas-agent-PAT-dont-delete")"
-  export GH_TOKEN
-fi
+credentials() {
+  if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    [ -f "$SECRETS/.claude-oauth-token-dont-delete" ] || die "no CLAUDE_CODE_OAUTH_TOKEN and no $SECRETS/.claude-oauth-token-dont-delete"
+    CLAUDE_CODE_OAUTH_TOKEN="$(tr -d '\n' < "$SECRETS/.claude-oauth-token-dont-delete")"
+    export CLAUDE_CODE_OAUTH_TOKEN
+  fi
+  if [ -z "${GH_TOKEN:-}" ]; then
+    [ -f "$SECRETS/.aaas-agent-PAT-dont-delete" ] || die "no GH_TOKEN and no $SECRETS/.aaas-agent-PAT-dont-delete"
+    GH_TOKEN="$(tr -d '\n' < "$SECRETS/.aaas-agent-PAT-dont-delete")"
+    export GH_TOKEN
+  fi
+}
 
 # Get the request to GitHub, on the change branch. Only the request: anything else
 # uncommitted stays yours, and stops a rebuild that would pull over it.
@@ -108,7 +132,13 @@ run() {
 }
 
 case "$cmd" in
+  check)
+    check_request
+    ;;
   build | rebuild)
+    # A build can start from an unfinished request; ship cannot. Say so now, not at ship.
+    check_request || say "Building anyway: ship will refuse until the request is complete."
+    credentials
     publish_request
     set +e; run "$cmd"; code=$?; set -e
     [ "$code" -eq 0 ] || exit "$code"
@@ -121,9 +151,17 @@ case "$cmd" in
     if [ -n "$(git status --porcelain --untracked-files=no)" ] || [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$current")" ]; then
       die "this checkout differs from origin/$current. Ship ships what is on GitHub: commit, push or rebuild first"
     fi
-    set +e; run ship --spec-testers 2 --fix-rounds 2 --auto-merge; code=$?; set -e
+    check_request || die "ship needs a complete request: fix it, rebuild, preview, then ship"
+    credentials
+    extra=()
+    [ "$merge" = 1 ] && extra=(--auto-merge)
+    set +e; run ship --spec-testers 2 --fix-rounds 2 ${extra[@]+"${extra[@]}"}; code=$?; set -e
     [ "$code" -eq 0 ] || exit "$code"
-    git checkout --quiet "$base" && git pull --quiet --ff-only origin "$base" || true
-    say "Shipped. Back on $base. If it merged, release.yml opens the deployment PR."
+    git pull --quiet --ff-only origin "$current" || true
+    if [ "$merge" = 1 ]; then
+      say "Shipped. If the harness merged it, release.yml opens the deployment PR; it is yours to merge."
+    else
+      say "Shipped: the PR above is green and waits for you. After you merge it: git checkout $base && git pull"
+    fi
     ;;
 esac
