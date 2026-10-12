@@ -113,6 +113,34 @@ record is in `runs/<id>/spec/`. `--change <name>` picks the request; `--request`
 ad-hoc text. `--spec-testers 2` runs two independent spec-testers and keeps both files;
 `--auto-merge` lets the harness merge a green change that `change.merge_blockers` allows.
 
+### The workbench: build, preview, rebuild, ship (`--task build | rebuild | ship`)
+
+`create-change` freezes the request when it starts. The workbench (roadmap step 5a) splits it so the
+operator can try a change on his Mac and change the request before anyone tests it independently:
+
+```bash
+./run.sh --task build   --app-repo aaas-app-demo --change item-archive   # requests/item-archive.md -> change/<date>-item-archive
+./run.sh --task rebuild --app-repo aaas-app-demo --change item-archive   # the request on the branch changed
+./run.sh --task ship    --app-repo aaas-app-demo --change item-archive --spec-testers 2 --fix-rounds 2 --auto-merge
+```
+
+- **build / rebuild**: one builder session on the change branch, offline (no `gh`, no git network). It
+  follows `create-app.md` sections 1-4; the harness commits what it left, with `AaaS-Build` and
+  `AaaS-Request: <blob>` trailers, and pushes. A rebuild is given the request now, a diff against the
+  request of the last build, and the branch's diff stat. An unchanged request is refused before any
+  session starts.
+- **ship**: refuses unless the request is complete (`intake.check_request`) and is the one the last build
+  used. Then the spec-testers, isolated on `master` as in `create-change`; one harness commit moves the
+  request into `changes/<id>/brief.md` with their tests; the harness opens the PR; then checks, fix
+  rounds, the byte check and the D-26 merge, shared with `create-change` (`finish_change`).
+- Independence now comes from isolation alone: the code exists before the tests, but the spec-testers
+  never see it (D-25, amended 12 October).
+
+In practice the operator does not type these. `workbench.sh build|rebuild|ship`, run from the app
+checkout (Rider's *Workbench* run configurations do), commits and pushes the request with his own
+git, runs `run.sh`, and pulls the branch the harness pushed. The preview is the app's own
+`scripts/preview.sh`. See the app's README, "The workbench".
+
 ### A conversation instead of a request file (`--task converse`)
 
 ```bash

@@ -243,11 +243,20 @@ APP_PROTECTED_GLOBS: tuple[str, ...] = (
     "changes/",
     # Pending requests are the requester's; the harness moves one when a change starts.
     "requests/",
+    # The operator's workbench (step 5a): how a branch is previewed and run from Rider.
+    "preview.yml",
+    ".run/",
 )
 
 # write-acceptance: writes are confined to the acceptance directory, and the base
 # class in it is the harness's, not the agent's.
 ACCEPTANCE_PROTECTED_GLOBS: tuple[str, ...] = ("AcceptanceBase.cs",)
+
+# A workbench builder (harness/workbench.py) works offline: the harness pushes for it.
+WORKBENCH_OFFLINE_REASON = (
+    "This is a workbench build: there is no pull request to open. Stop when the runbook's "
+    "section 4 passes; the harness commits what you left and pushes the branch."
+)
 
 # Offline tasks: the git subcommands that reach a remote. Without them, and without
 # gh, a session cannot read a branch it was not given (workspace.isolate).
@@ -293,6 +302,16 @@ class ToolPolicy:
     protected_globs: tuple[str, ...] = DEPLOYMENTS_PROTECTED_GLOBS
     # True for write-acceptance: no gh, no git network. See GIT_NETWORK_SUBCOMMANDS.
     offline: bool = False
+    # What an offline session is told when it reaches for gh or a remote. The
+    # spec-tester's reason by default; a workbench builder has its own.
+    offline_reason: str = (
+        "You write tests from the request alone; there is no pull request to look at "
+        "and nothing to open."
+    )
+    offline_git_reason: str = (
+        "The checkout is the default branch as it is before the change, on purpose: the "
+        "tests must come from the request, not from anyone's implementation."
+    )
     # False for intake: no shell at all. The SDK's disallowed_tools already removes
     # Bash; this refuses it again here, where the refusal is recorded.
     shell: bool = True
@@ -387,11 +406,7 @@ class ToolPolicy:
             return self._check_python(tokens)
         if program == "gh":
             if self.offline:
-                return Decision(
-                    False,
-                    "`gh` is not available in this task. You write tests from the request "
-                    "alone; there is no pull request to look at and nothing to open.",
-                )
+                return Decision(False, f"`gh` is not available in this task. {self.offline_reason}")
             return self._check_gh(tokens)
         if program == "git":
             return self._check_git(tokens)
@@ -507,12 +522,7 @@ class ToolPolicy:
         sub = args[0] if args else ""
         hit = next((a for a in args if a in GIT_NETWORK_SUBCOMMANDS), None)
         if self.offline and hit:
-            return Decision(
-                False,
-                f"`git {hit}` is not available in this task. The checkout is the default "
-                f"branch as it is before the change, on purpose: the tests must come from "
-                f"the request, not from anyone's implementation.",
-            )
+            return Decision(False, f"`git {hit}` is not available in this task. {self.offline_git_reason}")
         if sub == "push":
             if any(t in {"--force", "-f", "--force-with-lease"} for t in tokens):
                 return Decision(

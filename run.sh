@@ -103,7 +103,11 @@ case " $* " in
   *" --task converse "*) PUBLISH=(-p "127.0.0.1:${AAAS_PORT:-8765}:8765" --name aaas-converse) ;;
 esac
 
-exec docker run --rm -it ${PUBLISH[@]+"${PUBLISH[@]}"} \
+# -it only with a terminal: the workbench runs this from Rider and from scripts too.
+TTY=()
+[ -t 0 ] && [ -t 1 ] && TTY=(-it)
+
+exec docker run --rm ${TTY[@]+"${TTY[@]}"} ${PUBLISH[@]+"${PUBLISH[@]}"} \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
   -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \

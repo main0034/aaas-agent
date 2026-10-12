@@ -75,10 +75,17 @@ TASKS = {
     # A conversation with the app's owner that ends in a request, then create-change
     # and delivery, behind a local web page (harness/converse.py).
     "converse": "agent/intake.md",
+    # The workbench (harness/workbench.py, step 5a): create-change split in three.
+    # build and rebuild follow create-app.md sections 1-4 and push nothing themselves;
+    # ship runs the spec-testers and opens the PR.
+    "build": "agent/create-app.md",
+    "rebuild": "agent/create-app.md",
+    "ship": "agent/write-acceptance.md",
 }
 
 # Tasks that work in an application repository.
-APP_TASKS = {"create-app", "write-acceptance", "create-change", "converse"}
+APP_TASKS = {"create-app", "write-acceptance", "create-change", "converse", "build", "rebuild", "ship"}
+WORKBENCH_TASKS = {"build", "rebuild", "ship"}
 
 ACCEPTANCE_DIR = Path("tests/App.Tests/Acceptance")
 # The spec-tester's base class. It belongs to the app (the template ships it); the
@@ -514,6 +521,56 @@ def spec_tmp_dir() -> str:
     return str(Path.home())
 
 
+async def run_spec_tester(
+    args: argparse.Namespace, workspace: ws.Workspace, cid: str, letter: str, spec_prompt: str,
+    spec_runbook: str, run_dir: Path, run_id: str, record: RunRecord, status: StatusLine,
+    held: dict[str, bytes], spec_records: list, scratch: list[Path],
+) -> str | None:
+    """One spec-tester session, isolated on master. Returns None, or why its output cannot be used.
+
+    Its files are put in `held` (in memory), never left on disk: in create-change
+    the builder runs next, in the same container.
+    """
+    namespace = chg.namespace_for(cid) + letter
+    root = Path(tempfile.mkdtemp(prefix="spec-", dir=spec_tmp_dir()))
+    config = Path(tempfile.mkdtemp(prefix="spec-claude-", dir=spec_tmp_dir()))
+    scratch.extend([root, config])
+    app = ws.clone_isolated(root / args.app_repo, args.owner, args.app_repo)
+    acc_dir = app / ACCEPTANCE_DIR
+    if not (app / ACCEPTANCE_BASE).is_file():
+        raise ws.WorkspaceError(f"{args.app_repo} has no {ACCEPTANCE_BASE}; it comes from aaas-app-template")
+    policy = ToolPolicy(writable_roots=[acc_dir, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True)
+    spec_ws = ws.Workspace(root=root, deployments=workspace.deployments, reference=workspace.reference, app=app)
+    rec = RunRecord(
+        run_id=f"{run_id}-spec{letter}", directory=run_dir / f"spec{('-' + letter) if letter else ''}",
+        task="write-acceptance", request=args.request, defer_writes=True,
+        metadata={"change": cid, "namespace": namespace, "runbook": spec_runbook},
+    )
+    spec_records.append((rec, policy))
+    append = spec_prompt + "\n\n" + acceptance_briefing(spec_ws, namespace)
+    opts = _options(append, policy, app, workspace, {"GH_TOKEN": "", "CLAUDE_CONFIG_DIR": str(config)}, args)
+    print("\033[1m── spec-tester " + (letter + " ") * bool(letter) + "─" * (57 - 2 * bool(letter)) + "\033[0m")
+    before = _snapshot(rec)
+    outcome = await run_session(opts, args.request, rec, status, interactive=False)
+    files = [f for f in sorted(acc_dir.glob("*")) if f.is_file() and f.name != ACCEPTANCE_BASE.name]
+    problems = chg.conform(app, [f for f in files if f.suffix == ".cs"])
+    names = []
+    for f in files:
+        name = f"{letter}-{f.name}" if letter else f.name
+        held[name] = f.read_bytes()
+        names.append(name)
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.rmtree(config, ignore_errors=True)
+    record.rounds.append({"round": "-", "kind": f"spec-tester {letter}".strip(), **_delta(rec, before), "files": names})
+    record.cost_usd += rec.cost_usd
+    rec.end_reason = f"files: {', '.join(names) or '(none)'}" + (f"; {'; '.join(problems)}" if problems else "")
+    if outcome.stopped_by or not any(n.endswith(".cs") for n in names):
+        return f"spec-tester {letter} wrote no test file ({outcome.stopped_by or 'stopped'})".replace("  ", " ")
+    if problems:
+        return f"spec-tester {letter} broke a convention: {'; '.join(problems)}".replace("  ", " ")
+    return None
+
+
 async def run_change(args: argparse.Namespace, progress=None, result: dict | None = None) -> int:  # noqa: ANN001
     """create-change: brief -> spec-tester(s) -> builder -> hidden tests -> fix rounds.
 
@@ -601,45 +658,10 @@ async def run_change(args: argparse.Namespace, progress=None, result: dict | Non
     scratch: list[Path] = []
 
     async def spec_tester(letter: str) -> str | None:
-        """One spec-tester session. Returns None, or why its output cannot be used."""
-        namespace = chg.namespace_for(cid) + letter
-        root = Path(tempfile.mkdtemp(prefix="spec-", dir=spec_tmp_dir()))
-        config = Path(tempfile.mkdtemp(prefix="spec-claude-", dir=spec_tmp_dir()))
-        scratch.extend([root, config])
-        app = ws.clone_isolated(root / args.app_repo, args.owner, args.app_repo)
-        acc_dir = app / ACCEPTANCE_DIR
-        if not (app / ACCEPTANCE_BASE).is_file():
-            raise ws.WorkspaceError(f"{args.app_repo} has no {ACCEPTANCE_BASE}; it comes from aaas-app-template")
-        policy = ToolPolicy(writable_roots=[acc_dir, Path("/tmp")], protected_globs=ACCEPTANCE_PROTECTED_GLOBS, offline=True)
-        spec_ws = ws.Workspace(root=root, deployments=workspace.deployments, reference=workspace.reference, app=app)
-        rec = RunRecord(
-            run_id=f"{run_id}-spec{letter}", directory=run_dir / f"spec{('-' + letter) if letter else ''}",
-            task="write-acceptance", request=args.request, defer_writes=True,
-            metadata={"change": cid, "namespace": namespace, "runbook": spec_runbook},
+        return await run_spec_tester(
+            args, workspace, cid, letter, spec_prompt, spec_runbook, run_dir, run_id, record, status,
+            held, spec_records, scratch,
         )
-        spec_records.append((rec, policy))
-        append = spec_prompt + "\n\n" + acceptance_briefing(spec_ws, namespace)
-        opts = _options(append, policy, app, workspace, {"GH_TOKEN": "", "CLAUDE_CONFIG_DIR": str(config)}, args)
-        print("\033[1m── spec-tester " + (letter + " ") * bool(letter) + "─" * (57 - 2 * bool(letter)) + "\033[0m")
-        before = _snapshot(rec)
-        outcome = await run_session(opts, args.request, rec, status, interactive=False)
-        files = [f for f in sorted(acc_dir.glob("*")) if f.is_file() and f.name != ACCEPTANCE_BASE.name]
-        problems = chg.conform(app, [f for f in files if f.suffix == ".cs"])
-        names = []
-        for f in files:
-            name = f"{letter}-{f.name}" if letter else f.name
-            held[name] = f.read_bytes()
-            names.append(name)
-        shutil.rmtree(root, ignore_errors=True)
-        shutil.rmtree(config, ignore_errors=True)
-        record.rounds.append({"round": "-", "kind": f"spec-tester {letter}".strip(), **_delta(rec, before), "files": names})
-        record.cost_usd += rec.cost_usd
-        rec.end_reason = f"files: {', '.join(names) or '(none)'}" + (f"; {'; '.join(problems)}" if problems else "")
-        if outcome.stopped_by or not any(n.endswith(".cs") for n in names):
-            return f"spec-tester {letter} wrote no test file ({outcome.stopped_by or 'stopped'})".replace("  ", " ")
-        if problems:
-            return f"spec-tester {letter} broke a convention: {'; '.join(problems)}".replace("  ", " ")
-        return None
 
     async def steps() -> int:
         say("Writing down how we will check it works")
@@ -681,47 +703,10 @@ async def run_change(args: argparse.Namespace, progress=None, result: dict | Non
         tests_sha = chg.add_tests(workspace.app, cid, sorted(acc_out.iterdir()))
         record.metadata["tests commit"] = tests_sha[:7]
         print(f"\n\033[1mAcceptance tests committed to {branch} @ {tests_sha[:7]}\033[0m")
-        # GitHub updates a PR's head a few seconds after the push. Reading it sooner
-        # judged the builder's commit, without the tests, and started a fix round on
-        # it (20261010T130041Z).
-        if not ck.wait_for_head(pr, tests_sha, timeout=args.checks_timeout):
-            record.end_reason = f"the PR's head never became the tests commit {tests_sha[:7]}"
-            return 1
-
-        # 4. Checks, and fix rounds that may read the tests but not change them.
-        say("Checking it")
-        code = await fix_forward(
-            args, pr, workspace, builder_runbook, build_options, record, status, note=chg.fix_note(cid),
-            progress=say,
+        return await finish_change(
+            args, pr, head["baseRefName"], branch, cid, tests_sha, workspace, builder_runbook,
+            build_options, record, status, say, result,
         )
-        if code != 0:
-            return code
-        result["green"] = True
-        final = ck.pr_head(pr)["headRefOid"]
-        touched = chg.verify_untouched(workspace.app, cid, tests_sha, final)
-        if touched:
-            record.end_reason = f"green, but {', '.join(touched)} changed after the harness committed them"
-            return 1
-        record.end_reason += "; acceptance tests unchanged since the harness committed them"
-        try:
-            result["screens"] = sc.changed(workspace.app, head["baseRefName"], final)
-            record.metadata["screens"] = ", ".join(f"{x.path} ({x.title})" for x in result["screens"]) or "none"
-        except (OSError, subprocess.CalledProcessError) as exc:
-            record.metadata["screens"] = f"unknown: {exc}"
-
-        # 5. Auto-merge (step 2c): only a change the deterministic rules allow, and
-        # only when asked. Everything else stays for a human.
-        if args.auto_merge:
-            blockers = chg.merge_blockers(workspace.app, cid, head["baseRefName"], final)
-            record.metadata["auto-merge"] = "; ".join(blockers) or "eligible"
-            result["blockers"] = blockers
-            if blockers:
-                record.end_reason += f"; not auto-merged: {'; '.join(blockers)}"
-            else:
-                ck.merge(pr, final)
-                result["merged"] = True
-                record.end_reason += f"; auto-merged by the harness @ {final[:7]}"
-        return 0
 
     try:
         exit_code = await steps()
@@ -747,6 +732,59 @@ async def run_change(args: argparse.Namespace, progress=None, result: dict | Non
     print(f"  Report: {run_dir / 'report.md'}")
     print(f"\033[1mEnded because:\033[0m {record.end_reason or '(not recorded)'}")
     return exit_code
+
+
+async def finish_change(
+    args: argparse.Namespace, pr: ck.PullRequest, base: str, branch: str, cid: str, tests_sha: str,
+    workspace: ws.Workspace, builder_runbook: str, build_options, record: RunRecord,  # noqa: ANN001
+    status: StatusLine, say, result: dict,  # noqa: ANN001
+) -> int:
+    """From the tests commit on: checks, fix rounds, the byte check, screens, the D-26 merge.
+
+    Shared by create-change and the workbench's ship. The PR exists and its branch
+    has the change record with its acceptance tests at `tests_sha`.
+    """
+    # GitHub updates a PR's head a few seconds after the push. Reading it sooner
+    # judged the builder's commit, without the tests, and started a fix round on
+    # it (20261010T130041Z).
+    if not ck.wait_for_head(pr, tests_sha, timeout=args.checks_timeout):
+        record.end_reason = f"the PR's head never became the tests commit {tests_sha[:7]}"
+        return 1
+
+    # 4. Checks, and fix rounds that may read the tests but not change them.
+    say("Checking it")
+    code = await fix_forward(
+        args, pr, workspace, builder_runbook, build_options, record, status, note=chg.fix_note(cid),
+        progress=say,
+    )
+    if code != 0:
+        return code
+    result["green"] = True
+    final = ck.pr_head(pr)["headRefOid"]
+    touched = chg.verify_untouched(workspace.app, cid, tests_sha, final)
+    if touched:
+        record.end_reason = f"green, but {', '.join(touched)} changed after the harness committed them"
+        return 1
+    record.end_reason += "; acceptance tests unchanged since the harness committed them"
+    try:
+        result["screens"] = sc.changed(workspace.app, base, final)
+        record.metadata["screens"] = ", ".join(f"{x.path} ({x.title})" for x in result["screens"]) or "none"
+    except (OSError, subprocess.CalledProcessError) as exc:
+        record.metadata["screens"] = f"unknown: {exc}"
+
+    # 5. Auto-merge (step 2c): only a change the deterministic rules allow, and
+    # only when asked. Everything else stays for a human.
+    if args.auto_merge:
+        blockers = chg.merge_blockers(workspace.app, cid, base, final)
+        record.metadata["auto-merge"] = "; ".join(blockers) or "eligible"
+        result["blockers"] = blockers
+        if blockers:
+            record.end_reason += f"; not auto-merged: {'; '.join(blockers)}"
+        else:
+            ck.merge(pr, final)
+            result["merged"] = True
+            record.end_reason += f"; auto-merged by the harness @ {final[:7]}"
+    return 0
 
 
 def _options(append: str, policy: ToolPolicy, cwd: Path, workspace: ws.Workspace, env: dict, args) -> ClaudeAgentOptions:  # noqa: ANN001
@@ -1054,6 +1092,8 @@ def main() -> int:
         from . import converse
 
         return asyncio.run(converse.serve(args))
+    if args.task in WORKBENCH_TASKS:
+        return workbench_main(parser, args)
     if args.skip_local_checks and args.task != "create-app":
         parser.error("--skip-local-checks only applies to --task create-app")
     if args.task == "create-change":
@@ -1104,6 +1144,36 @@ def main() -> int:
         args.request = brief.read_text(encoding="utf-8")
 
     return asyncio.run(run(args))
+
+
+def workbench_main(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """build, rebuild, ship: argument rules, then harness/workbench_run.py."""
+    if not args.app_repo or not args.change:
+        parser.error(f"--task {args.task} needs --app-repo <name> and --change <name>")
+    if args.change == "TEMPLATE":
+        parser.error("TEMPLATE is the template, not a request")
+    if args.task != "ship" and (args.spec_testers != 1 or args.auto_merge or args.fix_rounds):
+        parser.error("--spec-testers, --auto-merge and --fix-rounds apply to ship, not to a build")
+    if args.task == "ship":
+        if args.request:
+            parser.error("ship takes the request from the branch; edit it there and rebuild")
+        if not 0 <= args.fix_rounds <= 2:
+            parser.error("--fix-rounds must be 0, 1 or 2 - create-app.md section 6 allows two")
+        if not 1 <= args.spec_testers <= 3:
+            parser.error("--spec-testers must be 1, 2 or 3")
+    if args.task == "rebuild" and args.request:
+        parser.error("rebuild takes the request from the branch: edit requests/<name>.md there")
+    if args.request and args.request.startswith("@"):
+        brief = Path(args.request[1:])
+        if not brief.is_file():
+            parser.error(f"no such file inside the container: {brief} (only ./briefs is mounted)")
+        args.request = brief.read_text(encoding="utf-8")
+    args.non_interactive = True
+    from . import workbench_run
+
+    if args.task == "ship":
+        return asyncio.run(workbench_run.run_ship(args))
+    return asyncio.run(workbench_run.run_build(args))
 
 
 if __name__ == "__main__":
