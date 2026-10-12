@@ -136,10 +136,15 @@ operator can try a change on his Mac and change the request before anyone tests 
 - Independence now comes from isolation alone: the code exists before the tests, but the spec-testers
   never see it (D-25, amended 12 October).
 
-In practice the operator does not type these. `workbench.sh build|rebuild|ship`, run from the app
-checkout (Rider's *Workbench* run configurations do), commits and pushes the request with his own
+In practice the operator does not type these. `workbench.sh check|build|rebuild|ship`, run from the
+app checkout (Rider's *Workbench* run configurations do), commits and pushes the request with his own
 git, runs `run.sh`, and pulls the branch the harness pushed. The preview is the app's own
 `scripts/preview.sh`. See the app's README, "The workbench".
+
+- **The request is written with any help you like** (Rider's AI assistant, given `requests/TEMPLATE.md`
+  and `AGENT.md`). `workbench.sh check` runs `intake.check_request` on it with the Mac's own python3.
+- **Ship ends at a pull request that waits for the operator** (chosen 12 October). `ship --merge` passes
+  `--auto-merge`, for a change D-26 allows. The harness merging on its own stays the chat path's.
 
 ### A conversation instead of a request file (`--task converse`)
 

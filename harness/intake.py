@@ -165,3 +165,19 @@ def blocker_words(blockers: list[str]) -> str:
     }
     words = [mapping.get(r, "touches a part of the app that is reviewed by hand") for r in reasons]
     return " and ".join(sorted(set(words)))
+
+
+if __name__ == "__main__":
+    # `workbench.sh check`: python3 -m harness.intake requests/<name>.md
+    import sys
+
+    if len(sys.argv) != 2:
+        sys.exit("usage: python3 -m harness.intake <request.md>")
+    path = Path(sys.argv[1])
+    found = check_request(path.read_text(encoding="utf-8"))
+    if found:
+        print(f"{path} is not complete yet:")
+        for problem in found:
+            print(f"  - {problem}")
+        sys.exit(1)
+    print(f"{path} is complete: title, What and why, Rules, and a route under Interface.")
