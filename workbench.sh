@@ -23,7 +23,9 @@
 #   GH_TOKEN                 <- .aaas-agent-PAT-dont-delete (agent: deployments + app only)
 #
 # Plain bash 3.2: macOS's /bin/bash runs it.
-set -euo pipefail
+set -Eeuo pipefail
+# Never stop without saying where: set -e alone exits silently.
+trap 'code=$?; echo "workbench: stopped at line $LINENO (exit $code): $BASH_COMMAND" >&2' ERR
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SECRETS="${AAAS_SECRETS_DIR:-$(dirname "$HERE")}"
@@ -52,7 +54,8 @@ cd "$app"
 repo="$(basename "$app")"
 [ -f requests/TEMPLATE.md ] || die "$repo has no requests/TEMPLATE.md; is this an application repository?"
 current="$(git rev-parse --abbrev-ref HEAD)"
-base="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+# origin/HEAD exists only in a clone that recorded it; a checkout without it is normal.
+base="$( (git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true) | sed 's#^origin/##')"
 base="${base:-master}"
 
 # The change's name: given, or this branch's, or the one request you are writing.
@@ -133,7 +136,7 @@ run() {
 
 case "$cmd" in
   check)
-    check_request
+    check_request || exit 1
     ;;
   build | rebuild)
     # A build can start from an unfinished request; ship cannot. Say so now, not at ship.
