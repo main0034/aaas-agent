@@ -112,6 +112,7 @@ exec docker run --rm ${TTY[@]+"${TTY[@]}"} ${PUBLISH[@]+"${PUBLISH[@]}"} \
   -e CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}" \
   -e GH_TOKEN="$GH_TOKEN" \
   -e AAAS_GITHUB_OWNER="${AAAS_GITHUB_OWNER:-main0034}" \
+  -e AAAS_MODEL="${AAAS_MODEL:-}" \
   -v "$RUNS_DIR/$RUN_ID:/work/runs/$RUN_ID" \
   -v "$HERE/briefs:/work/briefs:ro" \
   "$IMAGE" \

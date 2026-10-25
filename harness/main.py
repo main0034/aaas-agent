@@ -1049,7 +1049,7 @@ def main() -> int:
     parser.add_argument("--owner", default=os.environ.get("AAAS_GITHUB_OWNER", "main0034"))
     parser.add_argument("--runs-dir", default=os.environ.get("AAAS_RUNS_DIR", "runs"))
     parser.add_argument("--run-id", default=None)
-    parser.add_argument("--model", default=os.environ.get("AAAS_MODEL") or None)
+    parser.add_argument("--model", default=os.environ.get("AAAS_MODEL") or "claude-sonnet-5-5")
     parser.add_argument("--max-turns", type=int, default=60)
     parser.add_argument(
         "--fix-rounds",
